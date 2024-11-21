@@ -1,0 +1,20 @@
+# .perltidyrc - Configuration for perltidy
+
+# Indentation
+--indent-columns=2
+--continuation-indentation=2
+--extended-continuation-indentation
+
+# Line length and wrapping
+--maximum-line-length=160
+
+# Brackets spaces
+--paren-tightness=0
+--brace-tightness=0
+--block-brace-tightness=0
+
+# Comments
+
+# Blocks
+--cuddled-else
+--cuddled-blocks

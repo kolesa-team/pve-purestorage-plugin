@@ -1,0 +1,9 @@
+Package: libpve-storage-purestorage-perl
+Version: @@VERSION@@-@@PKGRELEASE@@
+Section: perl
+Priority: optional
+Architecture: @@ARCH@@
+Depends: libpve-storage-perl (>= 4.0-58), multipath-scan
+Maintainer: Timur Kumakbayev <timansky@neko.kz>
+Description: Proxmox VE plugin for Pure Storage.
+ This package contains storage plugin to use Pure Storage with Proxmox VE.
