@@ -31,6 +31,7 @@ $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
 my $purestorage_wwn_prefix = "624a9370";
+my $default_hgsuffix = "pve";
 
 my $DEBUG = 0;
 
@@ -128,7 +129,7 @@ sub properties {
     hgsuffix => {
       description => "Host group suffx.",
       type        => "string",
-      default     => "pve"
+      default     => $default_hgsuffix
     },
     address => {
       description => "PureStorage Management IP address or DNS name.",
@@ -151,7 +152,7 @@ sub options {
     address => { fixed => 1 },
     token   => { fixed => 1 },
 
-    hgsuffix  => { fixed    => 1 },
+    hgsuffix  => { optional => 1 },
     vgname    => { fixed    => 1 },
     check_ssl => { optional => 1 },
     nodes     => { optional => 1 },
@@ -420,7 +421,7 @@ sub purestorage_volume_connection {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  my $hname  = PVE::INotify::nodename() . "-" . $scfg->{ hgsuffix };
+  my $hname  = pure_host($scfg);
 
   my $params   = "host_names=$hname&volume_names=$vgname/$volname";
   my $response = $class->purestorage_request( $scfg, "connections", $action, $params );
@@ -470,7 +471,7 @@ sub purestorage_create_volume {
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $hname = PVE::INotify::nodename() . "-" . $scfg->{ hgsuffix };
+  my $hname  = pure_host($scfg);
 
   my $params;
   my $volparams;
@@ -508,7 +509,7 @@ sub purestorage_remove_volume {
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $hname = PVE::INotify::nodename() . "-" . $scfg->{ hgsuffix };
+  my $hname  = pure_host($scfg);
   my ( undef, undef, $vmid ) = $class->parse_volname( $volname );
 
   my $params;
@@ -589,7 +590,7 @@ sub purestorage_resize_volume {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  my $hname  = PVE::INotify::nodename() . "-" . $scfg->{ hgsuffix };
+  my $hname  = pure_host($scfg);
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
   my $params    = "names=$vgname/$volname";
   my $volparams = { "provisioned" => $size };
@@ -1163,5 +1164,15 @@ sub volume_has_feature {
   }
   return 1 if $features->{ $feature }->{ $key };
   return undef;
+}
+
+sub pure_host {
+  my ( $scfg ) = @_;
+  my $hname = PVE::INotify::nodename();
+  my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
+  if ($hgsuffix ne "") {
+    $hname .= "-" . $hgsuffix;
+  }
+  return $hname;
 }
 1;
