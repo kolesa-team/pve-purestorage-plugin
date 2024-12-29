@@ -295,9 +295,9 @@ sub purestorage_list_volumes {
 
   my $filter;
   if ( defined( $vmid ) ) {
-    $filter = "name='$vgname/vm-$vmid-disk-*'";
+    $filter = "(name='$vgname/vm-$vmid-disk-*'";
     $filter .= " or name='$vgname/vm-$vmid-cloudinit'";
-    $filter .= " or name='$vgname/vm-$vmid-state-*'";
+    $filter .= " or name='$vgname/vm-$vmid-state-*')";
   } else {
     $filter = "name='$vgname/*'";
   }
