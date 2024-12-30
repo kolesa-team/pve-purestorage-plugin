@@ -455,10 +455,8 @@ sub purestorage_volume_connection {
     }
   }
 
-  if ( $action eq "DELETE" ) {
-    print "Info :: Volume \"$vgname/$volname\" removed from host \"$hname\".\n";
-  }
-  print "Info :: Volume \"$vgname/$volname\" added to host \"$hname\".\n";
+  $action = $action eq "DELETE" ? "removed from" : "added to";
+  print "Info :: Volume \"$vgname/$volname\" $action host \"$hname\".\n";
   return 1;
 }
 
