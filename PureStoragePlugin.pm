@@ -1060,8 +1060,9 @@ sub deactivate_volume {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  $class->purestorage_volume_connection( $scfg, $volname, 'DELETE' );
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
+  
+  $class->purestorage_volume_connection( $scfg, $volname, 'DELETE' );
 
   print "Info :: Volume \"$vgname/$volname\" deactivated.\n";
 
