@@ -515,12 +515,6 @@ sub purestorage_remove_volume {
 
   $eradicate = ( $volname =~ /^vm-(\d+)-(cloudinit|state-.+)/ ) ? 1 : $eradicate;
 
-  my $running = PVE::QemuServer::check_running( $vmid );
-
-  if ( $running ) {
-    $class->deactivate_volume( $storeid, $scfg, $volname );
-  }
-
   $params = "names=$vgname/$volname";
   my $body = { destroyed => \1 };
 
