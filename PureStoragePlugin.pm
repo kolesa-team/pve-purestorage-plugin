@@ -823,9 +823,6 @@ sub alloc_image {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  # Convert size from KB to bytes
-  my $sizeB = $size * 1024;    # KB => B
-
   # Check for supported format (only 'raw' is allowed)
   die "Error :: Unsupported format ($fmt).\n" if $fmt ne 'raw';
 
@@ -835,7 +832,13 @@ sub alloc_image {
   $name = $class->find_free_diskname( $storeid, $scfg, $vmid ) if !$name;
 
   # Check size (must be between 1MB and 4PB)
-  die "Error :: Invalid size ($size kb < 1024 kb).\n" unless $size > 1024;    # Proxmox 1MB = 1049KB
+  if ($size < 1024) {
+    print "Info :: Size is too small ($size kb), adjusting to 1024 kb\n";
+    $size = 1024;
+  }
+  
+  # Convert size from KB to bytes
+  my $sizeB = $size * 1024;    # KB => B
 
   if ( !$class->purestorage_create_volume( $scfg, $name, $sizeB, $storeid ) ) {
     warn "Error :: Failed to create volume \"$vgname/$name\".\n";
