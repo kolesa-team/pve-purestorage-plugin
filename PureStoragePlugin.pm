@@ -810,7 +810,6 @@ sub find_free_diskname {
   my ( $class, $storeid, $scfg, $vmid, $fmt, $add_fmt_suffix ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::find_free_diskname\n" if $DEBUG;
 
-  my $disk_prefix = "$scfg->{vgname}/vm-$vmid-disk-";
   my $volumes     = $class->purestorage_list_volumes( $scfg, $vmid, $storeid );
   my @disk_list   = map { $_->{ name } } @$volumes;
 
