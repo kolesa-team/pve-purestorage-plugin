@@ -289,21 +289,25 @@ sub purestorage_volume_info {
 
 sub purestorage_list_volumes {
   my ( $class, $scfg, $vmid, $storeid, $destroyed ) = @_;
+
+  my $names = defined ($vmid) ? "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*" : "*";
+
+  return $class->purestorage_list_volumes2( $scfg, $names, $storeid, $destroyed );
+}
+
+sub purestorage_list_volumes2 {
+  my ( $class, $scfg, $names, $storeid, $destroyed ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
   $class->assert_multipath_support();
 
-  my $filter;
-  if ( defined( $vmid ) ) {
-    $filter = "(name='$vgname/vm-$vmid-disk-*'";
-    $filter .= " or name='$vgname/vm-$vmid-cloudinit'";
-    $filter .= " or name='$vgname/vm-$vmid-state-*')";
-  } else {
-    $filter = "name='$vgname/*'";
-  }
+  my @names_list = map { "name='$vgname/$_'" } split( ',', $names );
+  
+  my $filter = join( ' or ', @names_list );
 
   if ( defined( $destroyed ) ) {
-    $filter .= $destroyed ? " and destroyed='true'" : " and destroyed='false'";
+    $filter = '(' . $filter . ')' if $#names_list > 0;
+    $filter .= " and destroyed='" . ( $destroyed ? "true" : "false" ) . "'";
   }
 
   my $response = $class->purestorage_request( $scfg, "volumes", "GET", "filter=" . uri_escape( $filter ) );
