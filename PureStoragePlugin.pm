@@ -346,17 +346,13 @@ sub purestorage_get_wwn {
   my ( $class, $scfg, $volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_wwn\n" if $DEBUG;
 
-  my ( $vtype, $name, $vmid ) = $class->parse_volname( $volname );
-  my $volumes = $class->purestorage_list_volumes( $scfg, $vmid );
+  my $volumes = $class->purestorage_list_volumes2( $scfg, $volname, undef, 0 );
 
   foreach my $volume ( @$volumes ) {
-    if ( $volume->{ name } =~ /vm-$vmid-$name/ ) {
-
-      # Construct the WWN path
-      my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
-      my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
-      return ( $path, $vmid, $vtype, $wwn );
-    }
+    # Construct the WWN path
+    my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
+    my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
+    return ( $path, $wwn );
   }
 
   return 0;
@@ -789,7 +785,10 @@ sub filesystem_path {
   my ( $class, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::filesystem_path\n" if $DEBUG;
 
-  my ( $path, $vmid, $vtype, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
+  # do we even need this?
+  my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
+
+  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
   if ( !defined( $path ) || !defined( $vmid ) || !defined( $vtype ) ) {
     return wantarray ? ( "", "", "", "" ) : "";
