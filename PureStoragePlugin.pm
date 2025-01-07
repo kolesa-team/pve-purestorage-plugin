@@ -559,17 +559,15 @@ sub purestorage_resize_volume {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  my $hname  = pure_host($scfg);
-  my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
-  my $params    = "names=$vgname/$volname";
-  my $volparams = { "provisioned" => $size };
-  my $response  = $class->purestorage_request( $scfg, "volumes", "PATCH", $params, $volparams );
-
+  
   $scfg->{ cache }                                 ||= {};
   $scfg->{ cache }->{ volume_info }                ||= {};
   $scfg->{ cache }->{ volume_info }->{ "$vgname" } ||= {};
   $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" } = {};
 
+  my $params    = "names=$vgname/$volname";
+  my $volparams = { "provisioned" => $size };
+  my $response  = $class->purestorage_request( $scfg, "volumes", "PATCH", $params, $volparams );
   if ( $response->{ error } ) {
     die "Error :: PureStorage API :: Resize volume failed.\n"
       . "=> Trace:\n"
@@ -579,6 +577,8 @@ sub purestorage_resize_volume {
   }
 
   print "Info :: Volume \"$vgname/$volname\" resized.\n";
+  
+  my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
   $class->purestorage_rescan_diskmap( $wwid );
 
   # Wait for the device size to update
@@ -591,14 +591,15 @@ sub purestorage_resize_volume {
 
   while ( $iteration < $max_attempts ) {
     print "Info :: Waiting (" . $iteration . "s) for size update for volume \"$vgname/$volname\"...\n";
-    $iteration++;
-    $new_size = $class->purestorage_get_device_size( $path );
 
+    $new_size = $class->purestorage_get_device_size( $path );
     if ( $new_size >= $size ) {
       print "Info :: New size detected for volume \"$vgname/$volname\": $new_size bytes.\n";
       return $new_size;
     }
+    
     sleep $interval;
+    ++$iteration;
   }
 
   die "Error :: Timeout while waiting for updated size of volume \"$vgname/$volname\".\n";
