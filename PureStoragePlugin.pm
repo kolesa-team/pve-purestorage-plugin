@@ -380,11 +380,11 @@ sub purestorage_unmap_disk {
 }
 
 sub purestorage_rescan_diskmap {
-  my ( $class, $path ) = @_;
+  my ( $class, $mode, $path ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_rescan_diskmap\n" if $DEBUG;
 
-  # eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "node",    "--rescan" ] ) };
-  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "session", "--rescan" ] ) };
+  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", $mode,    "--rescan" ] ) };
+
   # eval { run_command( [ $cmd->{ "multipath" }, "-W" ] ) };
   # eval { run_command( [ $cmd->{ "multipath" }, "-r", $path ] ) };
 
@@ -582,7 +582,7 @@ sub purestorage_resize_volume {
   print "Info :: Volume \"$vgname/$volname\" resized.\n";
   
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
-  $class->purestorage_rescan_diskmap( $wwid );
+  $class->purestorage_rescan_diskmap( 'node', $wwid );
 
   # Wait for the device size to update
   my $iteration    = 0;
@@ -918,7 +918,7 @@ sub map_volume {
     die "Error :: Failed to run 'multipath -a $wwid'. Error :: $@\n";
   }
 
-  $class->purestorage_rescan_diskmap( $wwid );
+  $class->purestorage_rescan_diskmap( 'session', $wwid );
 
   # Wait for the device to apear
   my $iteration    = 0;
