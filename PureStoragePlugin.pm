@@ -39,13 +39,11 @@ my $DEBUG = 0;
 
 my $cmd = {};                 # Initialize as a hash, not an array
 $cmd->{ "iscsiadm" } = "/usr/bin/iscsiadm";
-my $found_iscsi_adm_support;
 
 sub assert_iscsi_support {
   my ( $class, $noerr ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::assert_iscsi_support\n" if $DEBUG;
-  return $found_iscsi_adm_support                                                       if $found_iscsi_adm_support;  # assume it won't be removed if ever found
-
+  
   my $found_iscsi_adm_exe = -x $cmd->{ "iscsiadm" };
 
   if ( $found_iscsi_adm_exe ) {
@@ -379,18 +377,6 @@ sub purestorage_unmap_disk {
   return 1;
 }
 
-sub purestorage_rescan_diskmap {
-  my ( $class, $mode, $path ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_rescan_diskmap\n" if $DEBUG;
-
-  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", $mode,    "--rescan" ] ) };
-
-  # eval { run_command( [ $cmd->{ "multipath" }, "-W" ] ) };
-  # eval { run_command( [ $cmd->{ "multipath" }, "-r", $path ] ) };
-
-  return 1;
-}
-
 sub purestorage_cleanup_diskmap {
   my ( $class ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_cleanup_diskmap\n" if $DEBUG;
@@ -582,8 +568,18 @@ sub purestorage_resize_volume {
   print "Info :: Volume \"$vgname/$volname\" resized.\n";
   
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
-  $class->purestorage_rescan_diskmap( 'node', $wwid );
+  
+  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "node", "--rescan" ] ) };
+  if ( $@ ) {
+    die "Error :: Failed to run 'iscsiadm --mode node --rescan' command. Error :: $@\n";
+  }
 
+  # FIXME: wwid is probably ignored
+  eval { run_command( [ $cmd->{ "multipath" }, "-r", $wwid ] ) };
+  if ( $@ ) {
+    die "Error :: Cannot execute 'multipath -r $wwid' command. Error :: $@\n";
+  }
+  
   # Wait for the device size to update
   my $iteration    = 0;
   my $max_attempts = 15;    # Max iter count
@@ -918,7 +914,10 @@ sub map_volume {
     die "Error :: Failed to run 'multipath -a $wwid'. Error :: $@\n";
   }
 
-  $class->purestorage_rescan_diskmap( 'session', $wwid );
+  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "session", "--rescan" ] ) };
+  if ( $@ ) {
+    die "Error :: Failed to run 'iscsiadm --node session --rescan' command. Error :: $@\n";
+  }
 
   # Wait for the device to apear
   my $iteration    = 0;
