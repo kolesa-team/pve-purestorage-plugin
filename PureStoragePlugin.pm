@@ -408,29 +408,18 @@ sub purestorage_volume_connection {
   my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
   $hname .= "-" . $hgsuffix if $hgsuffix ne "";
 
-  my $params   = "host_names=$hname&volume_names=$vgname/$volname";
+  my $params = "host_names=$hname&volume_names=$vgname/$volname";
 
   my $response = $class->purestorage_request( $scfg, "connections", $action, $params );
+  my $message;
   if ( $response->{ error } ) {
-    if ( $response->{ content }->{ errors }->[0]->{ message } eq "Connection already exists." ) {
-      warn "Error :: PureStorage API :: Connections \"$vgname/$volname\" to \"$hname\" already exist.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } elsif ( $response->{ content }->{ errors }->[0]->{ message } eq "Volume has been destroyed." ) {
-      warn "Error :: PureStorage API :: Failed to modify connection :: Nothing to remove.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } elsif ( $response->{ content }->{ errors }->[0]->{ message } eq "Connection does not exist." ) {
-      warn "Error :: PureStorage API :: Failed to modify connection :: Nothing to remove.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } else {
+    $message = $response->{ content }->{ errors }->[0]->{ message } || '*';
+    if ( $message eq "Connection already exists." ) {
+      $message = '' if $action eq 'POST';
+    } elsif ( $message eq "Volume has been destroyed." || $message eq "Connection does not exist.") {
+      $message = '' if $action eq 'DELETE';
+    }
+    if ( $message ne '' ) {
       $Data::Dumper::Indent = 0;
       die "Error :: PureStorage API :: Failed to modify connection.\n"
         . "=> Trace:\n"
@@ -438,10 +427,13 @@ sub purestorage_volume_connection {
         . $response->{ error } . "\n"
         . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
     }
+    $message = 'was already';
+  } else {
+    $message = 'is';
   }
 
-  $action = $action eq "DELETE" ? "removed from" : "added to";
-  print "Info :: Volume \"$vgname/$volname\" $action host \"$hname\".\n";
+  $message .= ' ' . ($action eq 'DELETE' ? 'removed from' : 'added to');
+  print "Info :: Volume \"$vgname/$volname\" $message host \"$hname\".\n";
   return 1;
 }
 
