@@ -417,11 +417,14 @@ sub purestorage_volume_connection {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  my $hname  = pure_host($scfg);
+
+  my $hname = PVE::INotify::nodename();
+  my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
+  $hname .= "-" . $hgsuffix if $hgsuffix ne "";
 
   my $params   = "host_names=$hname&volume_names=$vgname/$volname";
-  my $response = $class->purestorage_request( $scfg, "connections", $action, $params );
 
+  my $response = $class->purestorage_request( $scfg, "connections", $action, $params );
   if ( $response->{ error } ) {
     if ( $response->{ content }->{ errors }->[0]->{ message } eq "Connection already exists." ) {
       warn "Error :: PureStorage API :: Connections \"$vgname/$volname\" to \"$hname\" already exist.\n"
@@ -1122,15 +1125,5 @@ sub volume_has_feature {
   }
   return 1 if $features->{ $feature }->{ $key };
   return undef;
-}
-
-sub pure_host {
-  my ( $scfg ) = @_;
-  my $hname = PVE::INotify::nodename();
-  my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
-  if ($hgsuffix ne "") {
-    $hname .= "-" . $hgsuffix;
-  }
-  return $hname;
 }
 1;
