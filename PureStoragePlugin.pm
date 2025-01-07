@@ -511,12 +511,6 @@ sub purestorage_remove_volume {
 
   $eradicate = ( $volname =~ /^vm-(\d+)-(cloudinit|state-.+)/ ) ? 1 : $eradicate;
 
-  my $running = PVE::QemuServer::check_running( $vmid );
-
-  if ( $running ) {
-    $class->deactivate_volume( $storeid, $scfg, $volname );
-  }
-
   $params = "names=$vgname/$volname";
   my $body = { destroyed => \1 };
 
@@ -852,6 +846,8 @@ sub alloc_image {
 sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::free_image\n" if $DEBUG;
+
+  $class->deactivate_volume( $storeid, $scfg, $volname );
 
   $class->purestorage_remove_volume( $scfg, $volname, $storeid );
 
