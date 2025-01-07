@@ -487,26 +487,19 @@ sub purestorage_remove_volume {
   my ( $class, $scfg, $volname, $storeid, $eradicate ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_remove_volume\n" if $DEBUG;
 
-  $eradicate //= 0;
-
-  $class->assert_blockdev_support();
-  $class->assert_multipath_support();
+  if ( $volname =~ /^vm-(\d+)-(cloudinit|state-.+)/ ) {
+    $eradicate = 1;
+  } else {
+    $eradicate //= 0;
+  }
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $hname  = pure_host($scfg);
-  my ( undef, undef, $vmid ) = $class->parse_volname( $volname );
-
-  my $params;
-  my $response;
-
-  $eradicate = ( $volname =~ /^vm-(\d+)-(cloudinit|state-.+)/ ) ? 1 : $eradicate;
-
-  $params = "names=$vgname/$volname";
+  my $params = "names=$vgname/$volname";
   my $body = { destroyed => \1 };
 
-  $response = $class->purestorage_request( $scfg, "volumes", "PATCH", $params, $body );
+  my $response = $class->purestorage_request( $scfg, "volumes", "PATCH", $params, $body );
   if ( $response->{ error } ) {
     if ( $response->{ content }->{ errors }->[0]->{ message } eq "Volume has been deleted." ) {
       warn "Warning :: PureStorage API :: Destroy volume failed :: Nothing to remove.\n"
@@ -527,9 +520,7 @@ sub purestorage_remove_volume {
   }
 
   if ( $eradicate ) {
-    $params = "names=$vgname/$volname";
-
-    $response = $class->purestorage_request( $scfg, "volumes", "DELETE", $params, $body );
+    $response = $class->purestorage_request( $scfg, "volumes", "DELETE", $params );
     if ( $response->{ error } ) {
       $Data::Dumper::Indent = 0;
       die "Error :: PureStorage API :: Eradicate volume \"$vgname/$volname\" failed.\n"
@@ -541,8 +532,6 @@ sub purestorage_remove_volume {
       print "Info :: Volume \"$vgname/$volname\" eradicated.\n";
     }
   }
-
-  $class->purestorage_cleanup_diskmap();
 
   return 1;
 }
