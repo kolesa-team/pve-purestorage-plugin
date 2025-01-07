@@ -57,19 +57,15 @@ sub assert_iscsi_support {
 }
 
 $cmd->{ "multipath" }  = "/sbin/multipath";
-$cmd->{ "multipathd" } = "/sbin/multipath";
-my $found_multipath_support;
 
 sub assert_multipath_support {
   my ( $class, $noerr ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::assert_multipath_support\n" if $DEBUG;
-  return $found_multipath_support if $found_multipath_support;    # assume it won't be removed if ever found
   $class->assert_iscsi_support();
 
   my $found_multipath_exe  = -x $cmd->{ "multipath" };
-  my $found_multipathd_exe = -x $cmd->{ "multipathd" };
 
-  if ( $found_multipath_exe && $found_multipathd_exe ) {
+  if ( $found_multipath_exe ) {
     return 1;
   }
   die "Error :: no multipath support - please install multipath-tools.\n" if !$noerr;
@@ -387,10 +383,10 @@ sub purestorage_rescan_diskmap {
   my ( $class, $path ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_rescan_diskmap\n" if $DEBUG;
 
-  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "node",    "--rescan" ] ) };
+  # eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "node",    "--rescan" ] ) };
   eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "session", "--rescan" ] ) };
-  eval { run_command( [ $cmd->{ "multipath" }, "-W" ] ) };
-  eval { run_command( [ $cmd->{ "multipath" }, "-r", $path ] ) };
+  # eval { run_command( [ $cmd->{ "multipath" }, "-W" ] ) };
+  # eval { run_command( [ $cmd->{ "multipath" }, "-r", $path ] ) };
 
   return 1;
 }
@@ -945,11 +941,6 @@ sub map_volume {
     die "Error :: Failed to run 'multipath -a $wwid'. Error :: $@\n";
   }
 
-  eval { run_command( [ $cmd->{ "multipathd" }, "add", "path", $path ] ); };
-  if ( $@ ) {
-    die "Error :: Failed to run 'multipathd add path $path'. Error :: $@\n";
-  }
-
   $class->purestorage_rescan_diskmap( $wwid );
 
   # Wait for the device to apear
@@ -975,18 +966,11 @@ sub unmap_volume {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::unmap_volume\n" if $DEBUG;
 
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
-  my $device_path;
-  my @slaves = [];
-  my $slaves_path;
-  my $slave_name;
-  my $slave_path;
-  my $multipath_check = 0;
-  my $wwid_file       = "/etc/multipath/wwids";
 
   if ( $path && -e $path ) {
-    eval { run_command( [ $cmd->{ "multipathd" }, "disablequeueing", "map", $wwid ] ) };
     eval { run_command( [ $cmd->{ "blockdev" }, "--flushbufs", $path ] ) };
 
+    my $device_path;
     if ( $device_path = readlink( $path ) ) {
       print "Info :: Device path resolved to \"$device_path\".\n";
     } else {
@@ -999,6 +983,7 @@ sub unmap_volume {
     my $multipath_check = `$cmd->{ "multipath" } -l $path`;
     my $slaves_path     = "/sys/block/$device_name/slaves";
 
+    my @slaves = ();
     if ( -d $slaves_path ) {
       opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
       @slaves = grep { !/^\.\.?$/ } readdir( $dh );
@@ -1013,27 +998,22 @@ sub unmap_volume {
     if ( $multipath_check ) {
       print "Info :: Device \"$path\" is a multipath device. Proceeding with multipath removal.\n";
 
-      if ( -e $wwid_file ) {
-        open( my $in,  '<', $wwid_file ) or die $!;
-        open( my $out, '>', $wwid_file ) or die $!;
-        print $out grep { !/^#3/ } <$in>;
-        close $in;
-        close $out;
-      }
-
-      # If the device is a multipath device, remove the link
-      eval { run_command( [ $cmd->{ "multipath" }, "-f", $path ] ) == 0 or die "Failed to remove multipath link for \"$path\".\n"; };
-
+      eval { run_command( [ $cmd->{ "multipath" }, "-w", $wwid ] ) };
       if ( $@ ) {
-        warn "Warning :: $@";
+        warn "Warning :: Failed to run 'multipath -w $wwid'. Error :: $@";
       }
 
+      # remove the link
+      eval { run_command( [ $cmd->{ "multipath" }, "-f", $path ] ) };
+      if ( $@ ) {
+        warn "Warning :: Failed to run 'multipath -f $path'. Error :: $@";
+      }
     } else {
       print "Info :: Device \"$path\" is not a multipath device. Skipping multipath removal.\n";
     }
 
     # Iterate through slaves and delete each device
-    foreach $slave_name ( @slaves ) {
+    foreach my $slave_name ( @slaves ) {
       print "Info :: Remove slave: $slave_name\n" if $DEBUG;
       if ( $slave_name =~ m|^(sd[a-z]+)$| ) {
         $slave_name = $1;    # untaint;
