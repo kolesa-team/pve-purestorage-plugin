@@ -465,18 +465,10 @@ sub purestorage_create_volume {
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $hname  = pure_host($scfg);
+  my $params    = "names=$vgname/$volname";
+  my $volparams = { "provisioned" => $size };
 
-  my $params;
-  my $volparams;
-  my $serial;
-  my $response;
-
-  $params    = "names=$vgname/$volname";
-  $volparams = { "provisioned" => $size };
-
-  $response = $class->purestorage_request( $scfg, "volumes", "POST", $params, $volparams );
-
+  my $response = $class->purestorage_request( $scfg, "volumes", "POST", $params, $volparams );
   if ( $response->{ error } ) {
     die "Error :: PureStorage API :: Create volume failed.\n"
       . "=> Trace:\n"
@@ -485,8 +477,8 @@ sub purestorage_create_volume {
       . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
   }
 
-  $serial = $response->{ content }->{ items }->[0]->{ serial } || die "Error :: Failed to retrieve volume serial";
-  print "Info :: Volume \"$vgname/$volname\" created.\n";
+  my $serial = $response->{ content }->{ items }->[0]->{ serial } || die "Error :: Failed to retrieve volume serial";
+  print "Info :: Volume \"$vgname/$volname\" created (serial=$serial).\n";
 
   return 1;
 }
