@@ -833,11 +833,7 @@ sub alloc_image {
   my $sizeB = $size * 1024;    # KB => B
 
   if ( !$class->purestorage_create_volume( $scfg, $name, $sizeB, $storeid ) ) {
-    warn "Error :: Failed to create volume \"$vgname/$name\".\n";
-    if ( !$class->purestorage_remove_volume( $scfg, $name, $storeid, 1 ) ) {
-      warn "Error :: Failed to destroy volume \"$vgname/$name\".\n";
-    }
-    die;
+    die "Error :: Failed to create volume \"$vgname/$name\".\n";
   }
 
   return $name;
