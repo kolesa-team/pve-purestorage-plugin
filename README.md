@@ -93,7 +93,7 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 
 ## Configuration
 
-After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.conf`.
+After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.cfg`.
 
 ```
 purestorage: pure
