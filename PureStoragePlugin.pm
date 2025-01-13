@@ -738,8 +738,10 @@ sub parse_volname {
     my $vmid  = $2;                                    # Extract VMID
     my $name  = $3;                                    # Remaining part of the volume name
 
-    return ( $vtype, $name, $vmid );                   # Return type, name, and VMID
+    # ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
+    return ( $vtype, $name, $vmid, undef, undef, undef, 'raw' );
   }
+  
   die "Error :: Invalid volume name ($volname).\n";
   return 0;
 }
