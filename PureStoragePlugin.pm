@@ -958,7 +958,7 @@ sub unmap_volume {
       @slaves = grep { !/^\.\.?$/ } readdir( $dh );
       closedir( $dh );
 
-      print "Info :: Disk \"$device_name\" slaves: \n" . Dumper( @slaves ) if $DEBUG;
+      print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
     } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
       warn "Warning :: Disk \"$device_name\" has no slaves.\n";
       push @slaves, $1;
