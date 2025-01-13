@@ -35,59 +35,11 @@ my $default_hgsuffix = "pve";
 
 my $DEBUG = 0;
 
-### BLOCK: Asserts
-
-my $cmd = {};                 # Initialize as a hash, not an array
-$cmd->{ "iscsiadm" } = "/usr/bin/iscsiadm";
-
-sub assert_iscsi_support {
-  my ( $class, $noerr ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::assert_iscsi_support\n" if $DEBUG;
-  
-  my $found_iscsi_adm_exe = -x $cmd->{ "iscsiadm" };
-
-  if ( $found_iscsi_adm_exe ) {
-    return 1;
-  }
-  die "Error :: no iSCSI support - please install open-iscsi.\n" if !$noerr;
-  warn "Warning :: no iSCSI support - please install open-iscsi.\n";
-  return 0;
-}
-
-$cmd->{ "multipath" }  = "/sbin/multipath";
-
-sub assert_multipath_support {
-  my ( $class, $noerr ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::assert_multipath_support\n" if $DEBUG;
-  $class->assert_iscsi_support();
-
-  my $found_multipath_exe  = -x $cmd->{ "multipath" };
-
-  if ( $found_multipath_exe ) {
-    return 1;
-  }
-  die "Error :: no multipath support - please install multipath-tools.\n" if !$noerr;
-  warn "Warning :: no multipath support - please install multipath-tools.\n";
-  return 0;
-}
-
-$cmd->{ "blockdev" } = "/usr/sbin/blockdev";
-my $found_blockdev_support;
-
-sub assert_blockdev_support {
-  my ( $class, $noerr ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::assert_blockdev_support\n" if $DEBUG;
-  return $found_blockdev_support if $found_blockdev_support;    # assume it won't be removed if ever found
-
-  my $found_blockdev_exe = -x $cmd->{ "blockdev" };
-
-  if ( $found_blockdev_exe ) {
-    return 1;
-  }
-  die "Error :: no blockdev support - please install blockdev.\n" if !$noerr;
-  warn "Warning :: no blockdev support - please install blockdev.\n";
-  return 0;
-}
+my $cmd = {
+  iscsiadm  => '/usr/bin/iscsiadm',
+  multipath => '/sbin/multipath',
+  blockdev  => '/usr/sbin/blockdev'
+};
 
 ### BLOCK: Configuration
 sub api {
@@ -293,7 +245,6 @@ sub purestorage_list_volumes2 {
   my ( $class, $scfg, $names, $storeid, $destroyed ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
-  $class->assert_multipath_support();
 
   my @names_list = map { "name='$vgname/$_'" } split( ',', $names );
   
@@ -305,7 +256,6 @@ sub purestorage_list_volumes2 {
   }
 
   my $response = $class->purestorage_request( $scfg, "volumes", "GET", "filter=" . uri_escape( $filter ) );
-
   if ( $response->{ error } ) {
     die "Error :: PureStorage API :: List volumes status failed.\n"
       . "=> Trace:\n"
@@ -329,7 +279,7 @@ sub purestorage_list_volumes2 {
       size   => $_->{ provisioned },
       ctime  => $ctime,
       volid  => $storeid ? "$storeid:$volname" : $volname,
-      format => "raw"
+      format => 'raw'
     }
   } @{ $response->{ content }->{ items } };
 
@@ -440,8 +390,6 @@ sub purestorage_volume_connection {
 sub purestorage_create_volume {
   my ( $class, $scfg, $volname, $size, $storeid ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_create_volume\n" if $DEBUG;
-
-  $class->assert_multipath_support();
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
