@@ -887,62 +887,66 @@ sub unmap_volume {
 
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
 
-  my $device_path = abs_path( $path );
-  if ( defined($device_path) && -b $device_path ) {
-    print "Info :: Device path resolved to \"$device_path\".\n";
-  } else {
-    die "Error :: unable to get device path for $path - $!.\n";
-  }
- 
-  eval { run_command( [ $cmd->{ "blockdev" }, "--flushbufs", $path ] ) };
-  if ( $@ ) {
-    warn "Warning :: Failed to run 'blockdev --flushbufs $path'. Error :: $@";
-  }
-
-  my $device_name = basename( $device_path );
-  my $slaves_path     = "/sys/block/$device_name/slaves";
-
-  my @slaves = ();
-  if ( -d $slaves_path ) {
-    opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
-    @slaves = grep { !/^\.\.?$/ } readdir( $dh );
-    closedir( $dh );
-    print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
-  } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
-    warn "Warning :: Disk \"$device_name\" has no slaves.\n";
-    push @slaves, $1;
-  }
-
-  my $multipath_check = `$cmd->{ "multipath" } -l $wwid`;
-  if ( $multipath_check ) {
-    print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
-    eval { run_command( [ $cmd->{ "multipath" }, "-w", $wwid ] ) };
-    if ( $@ ) {
-      warn "Warning :: Failed to run 'multipath -w $wwid'. Error :: $@";
-    }
-
-    # remove the link
-    eval { run_command( [ $cmd->{ "multipath" }, "-f", $wwid ] ) };
-    if ( $@ ) {
-      warn "Warning :: Failed to run 'multipath -f $wwid'. Error :: $@";
-    }
-  } else {
-    print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
-  }
-
-  # Iterate through slaves and delete each device
-  foreach my $slave_name ( @slaves ) {
-    print "Info :: Remove slave: $slave_name\n" if $DEBUG;
-    if ( $slave_name =~ m|^(sd[a-z]+)$| ) {
-      $slave_name = $1;    # untaint;
-      $class->purestorage_unmap_disk( $slave_name );
+  if ( $path && -b $path ) {
+    my $device_path = abs_path( $path );
+    if ( defined( $device_path ) ) {
+      print "Info :: Device path resolved to \"$device_path\".\n";
     } else {
-      die "Error :: Invalid disk name \"$slave_name\".";
+      die "Error :: unable to get device path for $path - $!.\n";
     }
-  }
+ 
+    eval { run_command( [ $cmd->{ "blockdev" }, "--flushbufs", $path ] ) };
+    if ( $@ ) {
+      warn "Warning :: Failed to run 'blockdev --flushbufs $path'. Error :: $@";
+    }
 
-  print "Info :: Device \"$device_name\" removed from system.\n";
-  return 1;
+    my $device_name = basename( $device_path );
+    my $slaves_path     = "/sys/block/$device_name/slaves";
+
+    my @slaves = ();
+    if ( -d $slaves_path ) {
+      opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
+      @slaves = grep { !/^\.\.?$/ } readdir( $dh );
+      closedir( $dh );
+      print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
+    } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
+      warn "Warning :: Disk \"$device_name\" has no slaves.\n";
+      push @slaves, $1;
+    }
+
+    my $multipath_check = `$cmd->{ "multipath" } -l $wwid`;
+    if ( $multipath_check ) {
+      print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
+      eval { run_command( [ $cmd->{ "multipath" }, "-w", $wwid ] ) };
+      if ( $@ ) {
+        warn "Warning :: Failed to run 'multipath -w $wwid'. Error :: $@";
+      }
+
+      # remove the link
+      eval { run_command( [ $cmd->{ "multipath" }, "-f", $wwid ] ) };
+      if ( $@ ) {
+        warn "Warning :: Failed to run 'multipath -f $wwid'. Error :: $@";
+      }
+    } else {
+      print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
+    }
+
+    # Iterate through slaves and delete each device
+    foreach my $slave_name ( @slaves ) {
+      print "Info :: Remove slave: $slave_name\n" if $DEBUG;
+      if ( $slave_name =~ m|^(sd[a-z]+)$| ) {
+        $slave_name = $1;    # untaint;
+        $class->purestorage_unmap_disk( $slave_name );
+      } else {
+        die "Error :: Invalid disk name \"$slave_name\".";
+      }
+    }
+
+    print "Info :: Device \"$device_name\" removed from system.\n";
+    return 1;
+  }
+  
+  return 0;
 }
 
 sub activate_volume {
