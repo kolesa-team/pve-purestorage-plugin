@@ -986,20 +986,15 @@ sub volume_resize {
 }
 
 sub rename_volume {
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::rename_volume\n";
   my ( $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::rename_volume\n" if $DEBUG;
   die "Error :: not implemented in storage plugin \"$class\".\n" if $class->can( 'api' ) && $class->api() < 10;
 
-  my ( undef, $source_image, $source_vmid, $base_name, $base_vmid, undef, $format ) = $class->parse_volname( $source_volname );
-
-  $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid, $format, 1 )
-    if !$target_volname;
+  $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid ) if !$target_volname;
 
   $class->purestorage_rename_volume( $scfg, $source_volname, $target_volname );
 
-  $base_name = $base_name ? "${base_name}/" : '';
-
-  return "${storeid}:${base_name}${target_volname}";
+  return "$storeid:$target_volname";
 }
 
 sub volume_import {
