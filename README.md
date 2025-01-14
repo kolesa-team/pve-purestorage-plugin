@@ -56,6 +56,7 @@ blacklist {
 }
 
 blacklist_exceptions {
+  wwid "624a9370.*"
   device {
     vendor "PURE"
   }
