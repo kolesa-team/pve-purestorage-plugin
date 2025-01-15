@@ -109,6 +109,21 @@ sub options {
   };
 }
 
+### BLOCK: Supporting functions
+
+sub exec_command {
+  my ( $command, $die, %param ) = @_;
+
+  print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
+  eval { run_command( $command, %param ) };
+  if ( $@ ) {
+    my $error = " :: Cannot execute '" . join( ' ', @$command ) . "'. Error :: $@\n";
+    die 'Error' . $error if $die;
+
+    warn 'Warning' . $error;
+  }
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_request {
@@ -313,7 +328,7 @@ sub purestorage_unmap_disk {
     my $disk_path  = "/dev/$disk_name";
 
     if ( -e $disk_path ) {
-      run_command( [ $cmd->{ "blockdev" }, "--flushbufs", $disk_path ] );
+      exec_command( [ $cmd->{ blockdev }, '--flushbufs', $disk_path ] );
     }
 
     my $fh;
@@ -471,15 +486,14 @@ sub purestorage_get_device_size {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_device_size\n" if $DEBUG;
   my $size = 0;
 
-  eval {
-    run_command( [ $cmd->{ "blockdev" }, "--getsize64", $path ], outfunc => sub { $size = $_[0]; } );
-  };
-  if ( $@ ) {
-    die "Error :: Cannot execute 'blockdev' command for \"$path\". Error :: $@\n";
-  }
+  exec_command( [ $cmd->{ blockdev }, '--getsize64', $path ], 1,
+    outfunc => sub {
+      $size = $_[0];
+      chomp $size;
+    }
+  );
 
   print "Debug :: Detected size: $size\n" if $DEBUG;
-  chomp $size;
   return $size;
 }
 
@@ -489,7 +503,7 @@ sub purestorage_resize_volume {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  
+
   $scfg->{ cache }                                 ||= {};
   $scfg->{ cache }->{ volume_info }                ||= {};
   $scfg->{ cache }->{ volume_info }->{ "$vgname" } ||= {};
@@ -507,20 +521,14 @@ sub purestorage_resize_volume {
   }
 
   print "Info :: Volume \"$vgname/$volname\" resized.\n";
-  
+
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
-  
-  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "node", "--rescan" ] ) };
-  if ( $@ ) {
-    die "Error :: Failed to run 'iscsiadm --mode node --rescan' command. Error :: $@\n";
-  }
+
+  exec_command( [ $cmd->{ iscsiadm },  '--mode', 'node', '--rescan' ], 1);
 
   # FIXME: wwid is probably ignored
-  eval { run_command( [ $cmd->{ "multipath" }, "-r", $wwid ] ) };
-  if ( $@ ) {
-    die "Error :: Cannot execute 'multipath -r $wwid' command. Error :: $@\n";
-  }
-  
+  exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
+
   # Wait for the device size to update
   my $iteration    = 0;
   my $max_attempts = 15;    # Max iter count
@@ -851,17 +859,11 @@ sub map_volume {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  print "Info :: Mapped volume \"$vgname/$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
+  print "Info :: Mapping volume \"$vgname/$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
 
-  eval { run_command( [ $cmd->{ "multipath" }, "-a", $wwid ] ); };
-  if ( $@ ) {
-    die "Error :: Failed to run 'multipath -a $wwid'. Error :: $@\n";
-  }
+  exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
 
-  eval { run_command( [ $cmd->{ "iscsiadm" },  "--mode", "session", "--rescan" ] ) };
-  if ( $@ ) {
-    die "Error :: Failed to run 'iscsiadm --node session --rescan' command. Error :: $@\n";
-  }
+  exec_command( [ $cmd->{ iscsiadm },  '--mode', 'session', '--rescan' ], 1 );
 
   # Wait for the device to apear
   my $iteration    = 0;
@@ -877,7 +879,7 @@ sub map_volume {
     sleep $interval;
   }
 
-  warn "Warning :: Local path \"$path\" not exists.\n";
+  warn "Warning :: Local path \"$path\" does not exist.\n";
   return 0;
 }
 
@@ -894,11 +896,8 @@ sub unmap_volume {
     } else {
       die "Error :: unable to get device path for $path - $!.\n";
     }
- 
-    eval { run_command( [ $cmd->{ "blockdev" }, "--flushbufs", $path ] ) };
-    if ( $@ ) {
-      warn "Warning :: Failed to run 'blockdev --flushbufs $path'. Error :: $@";
-    }
+
+    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
 
     my $device_name = basename( $device_path );
     my $slaves_path     = "/sys/block/$device_name/slaves";
@@ -917,16 +916,10 @@ sub unmap_volume {
     my $multipath_check = `$cmd->{ "multipath" } -l $wwid`;
     if ( $multipath_check ) {
       print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
-      eval { run_command( [ $cmd->{ "multipath" }, "-w", $wwid ] ) };
-      if ( $@ ) {
-        warn "Warning :: Failed to run 'multipath -w $wwid'. Error :: $@";
-      }
+      exec_command( [ $cmd->{ multipath }, '-w', $wwid ] );
 
       # remove the link
-      eval { run_command( [ $cmd->{ "multipath" }, "-f", $wwid ] ) };
-      if ( $@ ) {
-        warn "Warning :: Failed to run 'multipath -f $wwid'. Error :: $@";
-      }
+      exec_command( [ $cmd->{ multipath }, '-f', $wwid ] );
     } else {
       print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
     }
