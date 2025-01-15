@@ -251,19 +251,19 @@ sub purestorage_volume_info {
 
 sub purestorage_list_volumes {
   my ( $class, $scfg, $vmid, $storeid, $destroyed ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
 
   my $names = defined ($vmid) ? "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*" : "*";
 
-  return $class->purestorage_list_volumes2( $scfg, $names, $storeid, $destroyed );
+  return $class->purestorage_get_volumes( $scfg, $names, $storeid, $destroyed );
 }
 
-sub purestorage_list_volumes2 {
+sub purestorage_get_volumes {
   my ( $class, $scfg, $names, $storeid, $destroyed ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
   my @names_list = map { "name='$vgname/$_'" } split( ',', $names );
-  
+
   my $filter = join( ' or ', @names_list );
 
   if ( defined( $destroyed ) ) {
@@ -302,13 +302,30 @@ sub purestorage_list_volumes2 {
   return \@volumes;
 }
 
+sub purestorage_get_volume_info {
+  my ( $class, $scfg, $volname, $storeid, $destroyed ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_volume_info\n" if $DEBUG;
+
+  my $volumes = $class->purestorage_get_volumes( $scfg, $volname, $storeid, $destroyed );
+  foreach my $volume ( @$volumes ) {
+    return $volume;
+  }
+
+  return undef;
+}
+
+sub purestorage_get_existing_volume_info {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+
+  return $class->purestorage_get_volume_info( $scfg, $volname, $storeid, 0 );
+}
+
 sub purestorage_get_wwn {
   my ( $class, $scfg, $volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_wwn\n" if $DEBUG;
 
-  my $volumes = $class->purestorage_list_volumes2( $scfg, $volname, undef, 0 );
-
-  foreach my $volume ( @$volumes ) {
+  my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
+  if ( $volume ) {
     # Construct the WWN path
     my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
     my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
