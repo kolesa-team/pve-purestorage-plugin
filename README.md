@@ -56,6 +56,7 @@ blacklist {
 }
 
 blacklist_exceptions {
+  wwid "624a9370.*"
   device {
     vendor "PURE"
   }
@@ -75,8 +76,10 @@ To manually install the plugin, follow these steps:
 git clone git@github.com:kolesa-team/pve-purestorage.git
 # Navigate to the Plugin Directory
 cd pve-purestorage
+# Create the custom plug directory if it does not already exist
+mkdir /usr/share/perl5/PVE/Storage/Custom
 # Copy plugin to custom plugin directory
-sudo cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom
+sudo cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
 # Restart Proxmox VE
 sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 ```
@@ -93,7 +96,7 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 
 ## Configuration
 
-After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.conf`.
+After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.cfg`.
 
 ```
 purestorage: pure
