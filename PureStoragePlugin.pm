@@ -32,7 +32,7 @@ $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
 my $purestorage_wwn_prefix = "624a9370";
-my $default_hgsuffix = "pve";
+my $default_hgsuffix = "";
 
 my $DEBUG = 0;
 
