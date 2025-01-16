@@ -145,6 +145,18 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 - API Token Permissions: Ensure that the API token used has the necessary permissions to create and manage volumes on the Pure Storage array.
 - Plugin Updates: Ensure you are using the latest version of the plugin. Check the GitHub repository for updates.
 
+### Known issues
+
+- `lvm inside a volume`: If you plan to use LVM inside a volume, it is better to add purestorage volumes to the ignore list to avoid scanning.
+
+```bash
+cat /etc/lvm/lvmlocal.conf
+...
+devices {
+  global_filter=["r|/dev/zd.*|","r|/dev/rbd.*|","r|/dev/mapper/3624a9370.*|"]
+}
+```
+
 ## Contributing
 
 Contributions to this project are welcome.
