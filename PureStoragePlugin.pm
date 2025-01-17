@@ -131,30 +131,33 @@ sub purestorage_request {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_request\n" if $DEBUG;
 
   my $api       = "2.26";
-  my $url       = $scfg->{ address };
   my $check_ssl = $scfg->{ check_ssl } ? 1 : 0;
 
-  $url .= "/api/$api/$type";
+  my $url = $scfg->{ address } . "/api/$api/$type";
   $url .= "?$params" if $params;
 
-  my $token =
-      $type eq "login"
-    ? $scfg->{ token }
-    : $class->purestorage_get_auth_token( $scfg );
-  my $headers = HTTP::Headers->new(
-    ( $type eq "login" ? "api-token" : "x-auth-token" ) => $token,
-    "Content-Type"                                      => "application/json"
-  );
+  my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
 
-  if ( $scfg->{ x_request_id } ) {
-    $headers->header( "X-Request-ID" => $scfg->{ x_request_id } );
+  my $login = $type eq 'login';
+  if ( $login ) {
+    $headers->header( 'api-token' => $scfg->{ token } );
+  } else {
+    if ( $scfg->{ x_auth_token } ) {
+      print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token::cached\n" if $DEBUG;
+    } else {
+      print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token\n" if $DEBUG;
+      $class->purestorage_request( $scfg, 'login', 'POST' );
+    }
+    $headers->header( 'x-auth-token' => $scfg->{ x_auth_token } );
   }
+  $headers->header( 'X-Request-ID' => $scfg->{ x_request_id } ) if $scfg->{ x_request_id };
 
   my $ua = LWP::UserAgent->new;
   $ua->ssl_opts(
     verify_hostname => 0,
     SSL_verify_mode => 0x00
-  ) if !$check_ssl;
+  ) unless $check_ssl;
+
   my $request      = HTTP::Request->new( $method, $url, $headers, $body ? encode_json( $body ) : undef );
   my $response     = $ua->request( $request );
   my $content_type = $response->header( "Content-Type" );
@@ -163,34 +166,21 @@ sub purestorage_request {
     ? decode_json( $response->content )
     : $response->decoded_content;
 
+  if ($login) {
+    if ( $response->is_success ) {
+      $headers = $response->headers;
+      $scfg->{ x_auth_token } = $headers->header( "x-auth-token" ) || die "Header 'x-auth-token' missing.";
+      $scfg->{ x_request_id } = $headers->header( "x-request-id" );
+    } else {
+      die "Error :: PureStorage API :: Authentication failed.\n" . "=> Trace:\n" . "==> Code: " . $response->code . "\n" .
+        ( $content ? "==> Message: " . Dumper( $content ) : "" );
+    }
+  }
+
   return {
     content => $content,
-    headers => $response->headers,
     error   => $response->is_success ? undef : $response->code,
   };
-}
-
-sub purestorage_get_auth_token {
-  my ( $class, $scfg ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token\n" if $DEBUG;
-
-  if ( !$scfg->{ x_auth_token } ) {
-    my $response = $class->purestorage_request( $scfg, "login", "POST" );
-
-    if ( $response->{ error } ) {
-      die "Error :: PureStorage API :: Authentication failed.\n" . "=> Trace:\n" . "==> Code: " . $response->{ error } . "\n" . $response->{ content }
-        ? "==> Message: " . Dumper( $response->{ content } )
-        : "";
-    }
-
-    $scfg->{ x_auth_token } = $response->{ headers }->header( "x-auth-token" ) || die "Header 'x-auth-token' missing.";
-    if ( $response->{ headers }->header( "x-request-id" ) ) {
-      $scfg->{ x_request_id } = $response->{ headers }->header( "x-request-id" );
-    }
-  } else {
-    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token::cached\n" if $DEBUG;
-  }
-  return $scfg->{ x_auth_token };
 }
 
 sub purestorage_volume_info {
