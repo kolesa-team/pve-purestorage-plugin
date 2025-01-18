@@ -32,7 +32,7 @@ $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
 my $purestorage_wwn_prefix = "624a9370";
-my $default_hgsuffix = "";
+my $default_hgsuffix       = "";
 
 my $DEBUG = 0;
 
@@ -124,15 +124,60 @@ sub exec_command {
   }
 }
 
+sub prepare_api_params {
+  my ( $parms ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::prepare_api_params\n" if $DEBUG;
+
+  return $parms unless ref( $parms ) eq 'HASH';
+
+  my @temp;
+  my $ref;
+  my @ands;
+  my $or;
+  while ( my ( $key, $value ) = each( %$parms ) ) {
+    $ref = ref $value;
+    if ( $ref eq 'HASH' ) {
+      @temp = ();
+      while ( my ( $fname, $fvalue ) = each( %$value ) ) {
+        $ref = ref $fvalue;
+        if ( $ref eq '' ) {
+          $fvalue = [ split( ',', $fvalue ) ];
+        } else {
+          die "Error :: Unsupported condition type: $ref" if $ref ne 'ARRAY';
+        }
+        $or     = $#$fvalue > 0;
+        $fvalue = join( ' or ', map { "$fname='$_'" } @$fvalue );
+        $fvalue = '(' . $fvalue . ')' if $or;
+        push @temp, $fvalue;
+      }
+      $value = join( ' and ', @temp );
+    } else {
+      $value = join( ',', @$value ) if $ref eq 'ARRAY';
+    }
+    push @ands, uri_escape( $key ) . '=' . uri_escape( $value );
+  }
+
+  return join( '&', @ands );
+}
+
+sub fix_snap_name {
+  my ( $snap_name ) = @_;
+
+  return 'snap-' . $snap_name;
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 my $psfa_api = "2.26";
+
 sub purestorage_api_request {
-  my ( $scfg, $action, $params ) = @_;
+  my ( $scfg, $action ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_request\n" if $DEBUG;
 
-  my $type =  $action->{ type };
-  my $url = $scfg->{ address } . '/api/' . $psfa_api . '/' . $type;
+  my $type = $action->{ type };
+  my $url  = $scfg->{ address } . '/api/' . $psfa_api . '/' . $type;
+
+  my $params = prepare_api_params( $action->{ params } );
   $url .= "?$params" if $params;
 
   my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
@@ -145,7 +190,7 @@ sub purestorage_api_request {
       print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token::cached\n" if $DEBUG;
     } else {
       print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token\n" if $DEBUG;
-      purestorage_api_request( $scfg, { type => 'login', method => 'POST' } );
+      purestorage_api_request( $scfg, { name => 'Authentication', type => 'login', method => 'POST' } );
     }
     $headers->header( 'x-auth-token' => $scfg->{ x_auth_token } );
   }
@@ -160,88 +205,81 @@ sub purestorage_api_request {
   my $request      = HTTP::Request->new( $action->{ method }, $url, $headers, $action->{ body } ? encode_json( $action->{ body } ) : undef );
   my $response     = $ua->request( $request );
   my $content_type = $response->header( "Content-Type" );
-  my $content      = defined $content_type && $content_type =~ /application\/json/ && $response->content ne ""
+  my $content =
+    defined $content_type && $content_type =~ /application\/json/ && $response->content ne ''
     ? decode_json( $response->content )
     : $response->decoded_content;
 
-  if ($login) {
-    if ( $response->is_success ) {
-      $headers = $response->headers;
-      $scfg->{ x_auth_token } = $headers->header( "x-auth-token" ) || die "Header 'x-auth-token' missing.";
-      $scfg->{ x_request_id } = $headers->header( "x-request-id" );
-    } else {
-      die "Error :: PureStorage API :: Authentication failed.\n" . "=> Trace:\n" . "==> Code: " . $response->code . "\n" .
-        ( $content ? "==> Message: " . Dumper( $content ) : "" );
+  $content = {} if $content eq '';
+
+  my $action_name = $action->{ name } || "Action '$type' (method '" . $action->{ method } . "')";
+  my $success     = $response->is_success;
+  if ( $success ) {
+    if ( $login ) {
+      $headers                = $response->headers;
+      $scfg->{ x_auth_token } = $headers->header( 'x-auth-token' ) || die "Error :: Header 'x-auth-token' is missing.";
+      $scfg->{ x_request_id } = $headers->header( 'x-request-id' );
+    }
+  } else {
+    my $ignore_errors = $action->{ ignore };
+    if ( defined( $ignore_errors ) ) {
+      $ignore_errors = [$ignore_errors] if ref( $ignore_errors ) eq '';
+      my $first = $content->{ errors }->[0]->{ message };
+      $success = 1 if grep { $_ eq $first } @$ignore_errors;
+    }
+
+    if ( !$success ) {
+      my $message = substr( $action_name, 0, 1 );
+      $message = $message eq uc( $message ) ? $action_name . ' failed' : 'Failed to ' . $action_name;
+      die "Error :: PureStorage API :: $message.\n"
+        . "=> Trace:\n"
+        . "==> Code: "
+        . $response->code . "\n"
+        . ( $content ? "==> Message: " . Dumper( $content ) : '' );
     }
   }
 
-  return {
-    content => $content,
-    error   => $response->is_success ? undef : $response->code,
-  };
+  return $content;
 }
 
 sub purestorage_volume_info {
   my ( $class, $scfg, $volname ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_info\n" if $DEBUG;
+
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  $scfg->{ cache }                                                                  ||= {};
-  $scfg->{ cache }->{ volume_info }                                                 ||= {};
-  $scfg->{ cache }->{ volume_info }->{ "$vgname" }                                  ||= {};
-  $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }                  ||= {};
-  $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ last_update } ||= 0;
+  $scfg->{ cache }                                                              ||= {};
+  $scfg->{ cache }->{ volume_info }                                             ||= {};
+  $scfg->{ cache }->{ volume_info }->{ $vgname }                                ||= {};
+  $scfg->{ cache }->{ volume_info }->{ $vgname }->{ $volname }                  ||= {};
+  $scfg->{ cache }->{ volume_info }->{ $vgname }->{ $volname }->{ last_update } ||= 0;
+
   my $current_time = gettimeofday();
 
-  if ( $current_time - $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ last_update } >= 60 ) {
+  my $volume = $scfg->{ cache }->{ volume_info }->{ $vgname }->{ $volname };
 
-    my $filter   = "name='$vgname/$volname'";
-    my $response = purestorage_api_request( $scfg, { type => 'volumes', method => 'GET' }, "filter=" . uri_escape( $filter ) );
+  if ( $current_time - $volume->{ last_update } >= 60 ) {
+    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_info\n" if $DEBUG;
 
-    if ( $response->{ error } ) {
-      die "Error :: PureStorage API :: Get volume \"$vgname/$volname\" info failed.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    }
+    $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
+    die "Error :: PureStorage API :: No volume data found for \"$vgname/$volname\".\n" unless $volume;
 
-    my $volumes = $response->{ content }->{ items };
-    unless ( ref( $volumes ) eq 'ARRAY' && @$volumes ) {
-      die "Error :: PureStorage API :: No volume data found for \"$vgname/$volname\".\n";
-    }
-
-    my $volume = $volumes->[0];
-    $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" } = {
-      size        => $volume->{ provisioned }           || 0,
-      used        => $volume->{ space }->{ total_used } || 0,
-      last_update => $current_time,
-    };
-
-    print "Debug :: curtime: " . $current_time . " " . $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ last_update } . "\n";
-    print "Debug :: Provisioned: "
-      . $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ size }
-      . ", Used: "
-      . $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ used } . "\n"
-      if $DEBUG;
-
-    print "Debug :: Provisioned: " . $volume->{ provisioned } . ", Used: " . $volume->{ space }->{ total_used } . "\n"
-      if $DEBUG;
+    $volume->{ last_update } = $current_time;
+    $scfg->{ cache }->{ volume_info }->{ $vgname }->{ $volname } = $volume;
   } else {
     print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_info::cached\n" if $DEBUG;
   }
 
-  return (
-    $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ size },
-    $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" }->{ used }
-  );
+  print "Debug :: curtime: " . $current_time . " " . $current_time . "\n"                    if $DEBUG;
+  print "Debug :: Provisioned: " . $volume->{ size } . ", Used: " . $volume->{ used } . "\n" if $DEBUG;
+
+  return ( $volume->{ size }, $volume->{ used } );
 }
 
 sub purestorage_list_volumes {
   my ( $class, $scfg, $vmid, $storeid, $destroyed ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
 
-  my $names = defined ($vmid) ? "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*" : "*";
+  my $names = defined( $vmid ) ? "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*" : "*";
 
   return $class->purestorage_get_volumes( $scfg, $names, $storeid, $destroyed );
 }
@@ -250,23 +288,17 @@ sub purestorage_get_volumes {
   my ( $class, $scfg, $names, $storeid, $destroyed ) = @_;
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  my @names_list = map { "name='$vgname/$_'" } split( ',', $names );
+  my $filter = { name => [ map { "$vgname/$_" } split( ',', $names ) ] };
+  $filter->{ destroyed } = $destroyed ? 'true' : 'false' if defined $destroyed;
 
-  my $filter = join( ' or ', @names_list );
+  my $action = {
+    name   => $names =~ m/[*,]/ ? 'list volumes' : 'get volume information',
+    type   => 'volumes',
+    method => 'GET',
+    params => { filter => $filter }
+  };
 
-  if ( defined( $destroyed ) ) {
-    $filter = '(' . $filter . ')' if $#names_list > 0;
-    $filter .= " and destroyed='" . ( $destroyed ? "true" : "false" ) . "'";
-  }
-
-  my $response = purestorage_api_request( $scfg, { type => 'volumes', method => 'GET' }, "filter=" . uri_escape( $filter ) );
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: List volumes status failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
+  my $response = purestorage_api_request( $scfg, $action );
 
   my @volumes = map {
     my $volname = $_->{ name };
@@ -280,12 +312,13 @@ sub purestorage_get_volumes {
       name   => $volname,
       vmid   => $volvm,
       serial => $_->{ serial },
-      size   => $_->{ provisioned },
+      size   => $_->{ provisioned }           || 0,
+      used   => $_->{ space }->{ total_used } || 0,
       ctime  => $ctime,
       volid  => $storeid ? "$storeid:$volname" : $volname,
       format => 'raw'
     }
-  } @{ $response->{ content }->{ items } };
+  } @{ $response->{ items } };
 
   return \@volumes;
 }
@@ -314,6 +347,7 @@ sub purestorage_get_wwn {
 
   my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
   if ( $volume ) {
+
     # Construct the WWN path
     my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
     my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
@@ -366,45 +400,43 @@ sub purestorage_cleanup_diskmap {
 }
 
 sub purestorage_volume_connection {
-  my ( $class, $scfg, $volname, $method ) = @_;
+  my ( $class, $scfg, $volname, $mode ) = @_;
 
-  $method //= 'POST';
-
+  my $method = $mode ? 'POST' : 'DELETE';
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_connection :: $method\n" if $DEBUG;
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $hname = PVE::INotify::nodename();
+  my $hname    = PVE::INotify::nodename();
   my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
   $hname .= "-" . $hgsuffix if $hgsuffix ne "";
 
-  my $params = "host_names=$hname&volume_names=$vgname/$volname";
-
-  my $response = purestorage_api_request( $scfg, { type => 'connections', method => $method }, $params );
-  my $message;
-  if ( $response->{ error } ) {
-    $message = $response->{ content }->{ errors }->[0]->{ message } || '*';
-    if ( $message eq "Connection already exists." ) {
-      $message = '' if $method eq 'POST';
-    } elsif ( $message eq "Volume has been destroyed." || $message eq "Connection does not exist.") {
-      $message = '' if $method eq 'DELETE';
-    }
-    if ( $message ne '' ) {
-      $Data::Dumper::Indent = 0;
-      die "Error :: PureStorage API :: Failed to modify connection.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    }
-    $message = 'was already';
+  my $name;
+  my $ignore;
+  if ( $mode ) {
+    $name   = 'create volume connection';
+    $ignore = 'Connection already exists.';
   } else {
-    $message = 'is';
+    $name   = 'delete volume connection';
+    $ignore = [ 'Volume has been destroyed.', 'Connection does not exist.' ];
   }
 
-  $message .= ' ' . ($method eq 'DELETE' ? 'removed from' : 'added to');
-  print "Info :: Volume \"$vgname/$volname\" $message host \"$hname\".\n";
+  my $action = {
+    name   => $name,
+    type   => 'connections',
+    method => $method,
+    ignore => $ignore,
+    params => {
+      host_names   => $hname,
+      volume_names => "$vgname/$volname"
+    }
+  };
+
+  my $response = purestorage_api_request( $scfg, $action );
+
+  my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
+  print "Info :: Volume \"$vgname/$volname\" is $message host \"$hname\".\n";
   return 1;
 }
 
@@ -415,24 +447,18 @@ sub purestorage_create_volume {
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $params = "names=$vgname/$volname";
   my $action = {
+    name   => 'create volume',
     type   => 'volumes',
     method => 'POST',
+    params => { names       => "$vgname/$volname" },
     body   => { provisioned => $size }
   };
 
-  my $response = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: Create volume failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
+  my $response = purestorage_api_request( $scfg, $action );
 
-  my $serial = $response->{ content }->{ items }->[0]->{ serial } || die "Error :: Failed to retrieve volume serial";
-  print "Info :: Volume \"$vgname/$volname\" created (serial=$serial).\n";
+  my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
+  print "Info :: Volume \"$vgname/$volname\" is created (serial=$serial).\n";
 
   return 1;
 }
@@ -450,46 +476,32 @@ sub purestorage_remove_volume {
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
 
-  my $params = "names=$vgname/$volname";
-
+  my $params = { names => "$vgname/$volname" };
   my $action = {
+    name   => 'destroy volume',
     type   => 'volumes',
     method => 'PATCH',
+    ignore => 'Volume has been deleted.',
+    params => $params,
     body   => { destroyed => \1 }
   };
 
-  my $response = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    if ( $response->{ content }->{ errors }->[0]->{ message } eq "Volume has been deleted." ) {
-      warn "Warning :: PureStorage API :: Destroy volume failed :: Nothing to remove.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } else {
-      $Data::Dumper::Indent = 0;
-      die "Error :: PureStorage API :: Destroy volume \"$vgname/$volname\" failed.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    }
-  } else {
-    print "Info :: Volume \"$vgname/$volname\" destroyed.\n";
-  }
+  my $response = purestorage_api_request( $scfg, $action );
+
+  my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
+  print "Info :: Volume \"$vgname/$volname\" is $message.\n";
 
   if ( $eradicate ) {
-    $response = purestorage_api_request( $scfg, { type => 'volumes', method => 'DELETE' }, $params );
-    if ( $response->{ error } ) {
-      $Data::Dumper::Indent = 0;
-      die "Error :: PureStorage API :: Eradicate volume \"$vgname/$volname\" failed.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } else {
-      print "Info :: Volume \"$vgname/$volname\" eradicated.\n";
-    }
+    $action = {
+      name   => 'eradicate volume',
+      type   => 'volumes',
+      method => 'DELETE',
+      params => $params,
+    };
+
+    purestorage_api_request( $scfg, $action );
+
+    print "Info :: Volume \"$vgname/$volname\" is eradicated.\n";
   }
 
   return 1;
@@ -500,7 +512,9 @@ sub purestorage_get_device_size {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_device_size\n" if $DEBUG;
   my $size = 0;
 
-  exec_command( [ $cmd->{ blockdev }, '--getsize64', $path ], 1,
+  exec_command(
+    [ $cmd->{ blockdev }, '--getsize64', $path ],
+    1,
     outfunc => sub {
       $size = $_[0];
       chomp $size;
@@ -523,27 +537,21 @@ sub purestorage_resize_volume {
   $scfg->{ cache }->{ volume_info }->{ "$vgname" } ||= {};
   $scfg->{ cache }->{ volume_info }->{ "$vgname" }->{ "$volname" } = {};
 
-  my $params = "names=$vgname/$volname";
   my $action = {
+    name   => 'resize volume',
     type   => 'volumes',
     method => 'PATCH',
+    params => { names       => "$vgname/$volname" },
     body   => { provisioned => $size }
   };
 
-  my $response  = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: Resize volume failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
+  purestorage_api_request( $scfg, $action );
 
   print "Info :: Volume \"$vgname/$volname\" resized.\n";
 
   my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
 
-  exec_command( [ $cmd->{ iscsiadm },  '--mode', 'node', '--rescan' ], 1);
+  exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
 
   # FIXME: wwid is probably ignored
   exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
@@ -578,23 +586,18 @@ sub purestorage_rename_volume {
 
   my $vgname = $scfg->{ vgname }  || die "Error :: Volume group name is not defined.\n";
   my $url    = $scfg->{ address } || die "Error :: Pure Storage host is not defined.\n";
-  my $params = "names=$vgname/$source_volname";
+
   my $action = {
+    name   => 'rename volume',
     type   => 'volumes',
     method => 'PATCH',
-    body   => { name => "$vgname/$target_volname" }
+    params => { names => "$vgname/$source_volname" },
+    body   => { name  => "$vgname/$target_volname" }
   };
 
-  my $response  = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: Rename volume failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
+  purestorage_api_request( $scfg, $action );
 
-  print "Info :: Volume \"$vgname/$source_volname\" renamed to \"$vgname/$target_volname\".\n";
+  print "Info :: Volume \"$vgname/$source_volname\" is renamed to \"$vgname/$target_volname\".\n";
 
   return 1;
 }
@@ -605,19 +608,19 @@ sub purestorage_snap_volume_create {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  my $params = "source_names=$vgname/$volname&suffix=snap-$snap_name";
+  my $action = {
+    name   => 'create volume snapshot',
+    type   => 'volume-snapshots',
+    method => 'POST',
+    params => {
+      source_names => "$vgname/$volname",
+      suffix       => fix_snap_name( $snap_name )
+    }
+  };
 
-  my $response = purestorage_api_request( $scfg, { type => 'volume-snapshots', method => 'POST' }, $params );
+  purestorage_api_request( $scfg, $action );
 
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: Snapshot volume failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
-
-  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" created.\n";
+  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" is created.\n";
   return 1;
 }
 
@@ -627,29 +630,24 @@ sub purestorage_snap_volume_rollback {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  my $params = "names=$vgname/$volname&overwrite=true";
-
   my $action = {
+    name   => 'restore volume snapshot',
     type   => 'volumes',
     method => 'POST',
-    body   => {
+    params => {
+      names     => "$vgname/$volname",
+      overwrite => 'true'
+    },
+    body => {
       source => {
-        name => "$vgname/$volname.snap-$snap_name"
+        name => "$vgname/$volname." . fix_snap_name( $snap_name )
       }
     }
   };
 
-  my $response = purestorage_api_request( $scfg, $action, $params );
+  purestorage_api_request( $scfg, $action );
 
-  if ( $response->{ error } ) {
-    die "Error :: PureStorage API :: Restore volume snapshot failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
-
-  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" restored.\n";
+  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" is restored.\n";
   return $volname;
 }
 
@@ -659,54 +657,34 @@ sub purestorage_snap_volume_delete {
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
-  my $params = "names=$vgname/$volname.snap-$snap_name";
-
+  my $params = { names => "$vgname/$volname." . fix_snap_name( $snap_name ) };
   my $action = {
+    name   => 'destroy volume snapshot',
     type   => 'volume-snapshots',
     method => 'PATCH',
+    ignore =>
+      [ 'Volume snapshot has been destroyed. It can be recovered by purevol recover and eradicated by purevol eradicate.', 'No such volume or snapshot.' ],
+    params => $params,
     body   => { destroyed => \1 }
   };
+  my $response = purestorage_api_request( $scfg, $action );
 
-  my $response = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    my @valid_errors =
-      ( "Volume snapshot has been destroyed. It can be recovered by purevol recover and eradicated by purevol eradicate.", "No such volume or snapshot." );
-    if ( grep { $_ eq $response->{ content }->{ errors }->[0]->{ message } } @valid_errors ) {
-      warn "Warning :: PureStorage API :: Destroy snapshot failed :: Nothing to destoy.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    } else {
-      $Data::Dumper::Indent = 0;
-      die "Error :: PureStorage API :: Destroy volume snapshot failed.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->{ error } . "\n"
-        . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-    }
-  }
+  my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
+  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" is $message.\n";
 
-  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" destroyed.\n";
-
-  $params = "names=$vgname/$volname.snap-$snap_name";
+  #FIXME: Pure FA API states that replication_snapshot is query (not body) parameter
   $action = {
+    name   => 'eradicate volume snapshot',
     type   => 'volume-snapshots',
     method => 'DELETE',
+    ignore => 'No such volume or snapshot.',
+    params => $params,
     body   => { replication_snapshot => \1 }
   };
+  $response = purestorage_api_request( $scfg, $action );
 
-  $response = purestorage_api_request( $scfg, $action, $params );
-  if ( $response->{ error } ) {
-    $Data::Dumper::Indent = 0;
-    die "Error :: PureStorage API :: Eradicate volume \"$vgname/$volname\" snapshot \"$snap_name\" failed.\n"
-      . "=> Trace:\n"
-      . "==> Code: "
-      . $response->{ error } . "\n"
-      . ( $response->{ content } ? "==> Message: " . Dumper( $response->{ content } ) : "" );
-  }
-
-  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" eradicated.\n";
+  $message = ( $response->{ errors } ? 'already ' : '' ) . 'eradicated';
+  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" is $message.\n";
   return 1;
 }
 
@@ -724,7 +702,7 @@ sub parse_volname {
     # ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
     return ( $vtype, $name, $vmid, undef, undef, undef, 'raw' );
   }
-  
+
   die "Error :: Invalid volume name ($volname).\n";
   return 0;
 }
@@ -761,8 +739,8 @@ sub find_free_diskname {
   my ( $class, $storeid, $scfg, $vmid, $fmt, $add_fmt_suffix ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::find_free_diskname\n" if $DEBUG;
 
-  my $volumes     = $class->purestorage_list_volumes( $scfg, $vmid, $storeid );
-  my @disk_list   = map { $_->{ name } } @$volumes;
+  my $volumes   = $class->purestorage_list_volumes( $scfg, $vmid, $storeid );
+  my @disk_list = map { $_->{ name } } @$volumes;
 
   return PVE::Storage::Plugin::get_next_vm_diskname( \@disk_list, $storeid, $vmid, undef, $scfg );
 }
@@ -782,7 +760,7 @@ sub alloc_image {
   $name = $class->find_free_diskname( $storeid, $scfg, $vmid ) if !$name;
 
   # Check size (must be between 1MB and 4PB)
-  if ($size < 1024) {
+  if ( $size < 1024 ) {
     print "Info :: Size is too small ($size kb), adjusting to 1024 kb\n";
     $size = 1024;
   }
@@ -832,12 +810,13 @@ sub status {
   if ( $current_time - $cache->{ last_update } >= 60 ) {
     print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
 
-    my $response = purestorage_api_request( $scfg, { type => 'arrays/space', method => 'GET' } );
+    my $response = purestorage_api_request( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
 
     # Get storage capacity and used space from the response
-    $cache->{ total } = $response->{ content }->{ items }->[0]->{ capacity };
-    $cache->{ used }  = $response->{ content }->{ items }->[0]->{ space }->{ total_physical };
-    # $cache->{ used } = $response->{ content }->{ items }->[0]->{ space }->{ total_used }; # Do not know what is correct
+    $cache->{ total } = $response->{ items }->[0]->{ capacity };
+    $cache->{ used }  = $response->{ items }->[0]->{ space }->{ total_physical };
+
+    # $cache->{ used } = $response->{ items }->[0]->{ space }->{ total_used }; # Do not know what is correct
 
     $cache->{ last_update } = $current_time;
   } else {
@@ -857,6 +836,8 @@ sub status {
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_storage\n" if $DEBUG;
+
+  #FIXME: Why is this needed?
   $class->purestorage_cleanup_diskmap();
 
   return 1;
@@ -875,7 +856,7 @@ sub volume_size_info {
 
   my ( $size, $used ) = $class->purestorage_volume_info( $scfg, $volname );
 
-  return wantarray ? ( $size, "raw", $used, undef ) : $size;
+  return wantarray ? ( $size, 'raw', $used, undef ) : $size;
 }
 
 sub map_volume {
@@ -889,7 +870,7 @@ sub map_volume {
 
   exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
 
-  exec_command( [ $cmd->{ iscsiadm },  '--mode', 'session', '--rescan' ], 1 );
+  exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
 
   # Wait for the device to apear
   my $iteration    = 0;
@@ -926,7 +907,7 @@ sub unmap_volume {
     exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
 
     my $device_name = basename( $device_path );
-    my $slaves_path     = "/sys/block/$device_name/slaves";
+    my $slaves_path = "/sys/block/$device_name/slaves";
 
     my @slaves = ();
     if ( -d $slaves_path ) {
@@ -972,7 +953,7 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_volume\n" if $DEBUG;
 
-  $class->purestorage_volume_connection( $scfg, $volname );
+  $class->purestorage_volume_connection( $scfg, $volname, 1 );
 
   $class->map_volume( $storeid, $scfg, $volname, $snapname );
   return 1;
@@ -986,7 +967,7 @@ sub deactivate_volume {
 
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
 
-  $class->purestorage_volume_connection( $scfg, $volname, 'DELETE' );
+  $class->purestorage_volume_connection( $scfg, $volname, 0 );
 
   print "Info :: Volume \"$vgname/$volname\" deactivated.\n";
 
@@ -1012,6 +993,7 @@ sub rename_volume {
   die "Error :: not implemented in storage plugin \"$class\".\n" if $class->can( 'api' ) && $class->api() < 10;
 
   if ( $target_volname ) {
+
     # See RBDPlugin.pm (note, currently PVE does not supply $target_volname parameter)
     my $volume = $class->purestorage_get_volume_info( $scfg, $target_volname, $storeid );
     die "target volume '$target_volname' already exists\n" if $volume;
@@ -1039,11 +1021,8 @@ sub volume_snapshot {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot\n" if $DEBUG;
 
-  my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+  $class->purestorage_snap_volume_create( $scfg, $snap, $volname );
 
-  if ( !$class->purestorage_snap_volume_create( $scfg, $snap, $volname ) ) {
-    die "Error :: Failed to snapshot volume \"$vgname/$volname\".\n";
-  }
   return 1;
 }
 
@@ -1051,11 +1030,8 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot_rollback\n" if $DEBUG;
 
-  my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+  $class->purestorage_snap_volume_rollback( $scfg, $snap, $volname );
 
-  if ( !$class->purestorage_snap_volume_rollback( $scfg, $snap, $volname ) ) {
-    die "Error :: Failed to rollback snapshot volume \"$vgname/$volname\".\n";
-  }
   return 1;
 }
 
@@ -1063,11 +1039,8 @@ sub volume_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot_delete\n" if $DEBUG;
 
-  my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+  $class->purestorage_snap_volume_delete( $scfg, $snap, $volname );
 
-  if ( !$class->purestorage_snap_volume_delete( $scfg, $snap, $volname ) ) {
-    die "Error :: Failed to snapshot volume \"$vgname/$volname\".\n";
-  }
   return 1;
 }
 
