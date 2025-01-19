@@ -32,7 +32,7 @@ $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
 my $purestorage_wwn_prefix = "624a9370";
-my $default_hgsuffix = "pve";
+my $default_hgsuffix = "";
 
 my $DEBUG = 0;
 
@@ -251,19 +251,19 @@ sub purestorage_volume_info {
 
 sub purestorage_list_volumes {
   my ( $class, $scfg, $vmid, $storeid, $destroyed ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
 
   my $names = defined ($vmid) ? "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*" : "*";
 
-  return $class->purestorage_list_volumes2( $scfg, $names, $storeid, $destroyed );
+  return $class->purestorage_get_volumes( $scfg, $names, $storeid, $destroyed );
 }
 
-sub purestorage_list_volumes2 {
+sub purestorage_get_volumes {
   my ( $class, $scfg, $names, $storeid, $destroyed ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
   my @names_list = map { "name='$vgname/$_'" } split( ',', $names );
-  
+
   my $filter = join( ' or ', @names_list );
 
   if ( defined( $destroyed ) ) {
@@ -302,13 +302,30 @@ sub purestorage_list_volumes2 {
   return \@volumes;
 }
 
+sub purestorage_get_volume_info {
+  my ( $class, $scfg, $volname, $storeid, $destroyed ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_volume_info\n" if $DEBUG;
+
+  my $volumes = $class->purestorage_get_volumes( $scfg, $volname, $storeid, $destroyed );
+  foreach my $volume ( @$volumes ) {
+    return $volume;
+  }
+
+  return undef;
+}
+
+sub purestorage_get_existing_volume_info {
+  my ( $class, $scfg, $volname, $storeid ) = @_;
+
+  return $class->purestorage_get_volume_info( $scfg, $volname, $storeid, 0 );
+}
+
 sub purestorage_get_wwn {
   my ( $class, $scfg, $volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_wwn\n" if $DEBUG;
 
-  my $volumes = $class->purestorage_list_volumes2( $scfg, $volname, undef, 0 );
-
-  foreach my $volume ( @$volumes ) {
+  my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
+  if ( $volume ) {
     # Construct the WWN path
     my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
     my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
@@ -545,7 +562,7 @@ sub purestorage_resize_volume {
       print "Info :: New size detected for volume \"$vgname/$volname\": $new_size bytes.\n";
       return $new_size;
     }
-    
+
     sleep $interval;
     ++$iteration;
   }
@@ -760,7 +777,7 @@ sub alloc_image {
     print "Info :: Size is too small ($size kb), adjusting to 1024 kb\n";
     $size = 1024;
   }
-  
+
   # Convert size from KB to bytes
   my $sizeB = $size * 1024;    # KB => B
 
@@ -805,14 +822,14 @@ sub status {
   my $current_time = gettimeofday();
   if ( $current_time - $cache->{ last_update } >= 60 ) {
     print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
-    
+
     my $response = $class->purestorage_request( $scfg, "arrays/space", "GET" );
 
     # Get storage capacity and used space from the response
     $cache->{ total } = $response->{ content }->{ items }->[0]->{ capacity };
     $cache->{ used }  = $response->{ content }->{ items }->[0]->{ space }->{ total_physical };
     # $cache->{ used } = $response->{ content }->{ items }->[0]->{ space }->{ total_used }; # Do not know what is correct
-    
+
     $cache->{ last_update } = $current_time;
   } else {
     print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status::cached\n" if $DEBUG;
@@ -938,7 +955,7 @@ sub unmap_volume {
     print "Info :: Device \"$device_name\" removed from system.\n";
     return 1;
   }
-  
+
   return 0;
 }
 
@@ -959,7 +976,7 @@ sub deactivate_volume {
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
-  
+
   $class->purestorage_volume_connection( $scfg, $volname, 'DELETE' );
 
   print "Info :: Volume \"$vgname/$volname\" deactivated.\n";
@@ -982,9 +999,19 @@ sub volume_resize {
 sub rename_volume {
   my ( $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::rename_volume\n" if $DEBUG;
+
   die "Error :: not implemented in storage plugin \"$class\".\n" if $class->can( 'api' ) && $class->api() < 10;
 
-  $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid ) if !$target_volname;
+  if ( $target_volname ) {
+    # See RBDPlugin.pm (note, currently PVE does not supply $target_volname parameter)
+    my $volume = $class->purestorage_get_volume_info( $scfg, $target_volname, $storeid );
+    die "target volume '$target_volname' already exists\n" if $volume;
+  } else {
+    $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid );
+  }
+
+  # we need to unmap source volume (see RBDPlugin.pm)
+  $class->unmap_volume( $storeid, $scfg, $source_volname );
 
   $class->purestorage_rename_volume( $scfg, $source_volname, $target_volname );
 
