@@ -124,6 +124,14 @@ sub exec_command {
   }
 }
 
+sub fix_snap_name {
+  my ($snap_name) = @_;
+
+  $snap_name =~ s/_/-/g;
+
+  return 'snap-' . $snap_name;
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_request {
@@ -598,10 +606,13 @@ sub purestorage_snap_volume_create {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_create\n" if $DEBUG;
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+  
+  my $real_snap_name = fix_snap_name($snap_name);
+  
   my $params;
   my $response;
 
-  $params = "source_names=$vgname/$volname&suffix=snap-$snap_name";
+  $params = "source_names=$vgname/$volname&suffix=$real_snap_name";
 
   $response = $class->purestorage_request( $scfg, "volume-snapshots", "POST", $params );
 
@@ -622,6 +633,9 @@ sub purestorage_snap_volume_rollback {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_rollback\n" if $DEBUG;
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+
+  my $real_snap_name = fix_snap_name($snap_name);
+  
   my $params;
   my $response;
   my $body;
@@ -629,7 +643,7 @@ sub purestorage_snap_volume_rollback {
   $params = "names=$vgname/$volname&overwrite=true";
   $body   = {
     source => {
-      name => "$vgname/$volname.snap-$snap_name"
+      name => "$vgname/$volname.$real_snap_name"
     }
   };
 
@@ -652,12 +666,15 @@ sub purestorage_snap_volume_delete {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_delete\n" if $DEBUG;
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
+
+  my $real_snap_name = fix_snap_name($snap_name);
+  
   my $params;
 
   my $response;
   my $body;
 
-  $params = "names=$vgname/$volname.snap-$snap_name";
+  $params = "names=$vgname/$volname.$real_snap_name";
   $body   = { destroyed => \1 };
 
   $response = $class->purestorage_request( $scfg, "volume-snapshots", "PATCH", $params, $body );
@@ -683,7 +700,7 @@ sub purestorage_snap_volume_delete {
 
   print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" destroyed.\n";
 
-  $params = "names=$vgname/$volname.snap-$snap_name";
+  $params = "names=$vgname/$volname.$real_snap_name";
   $body   = { replication_snapshot => \1 };
 
   $response = $class->purestorage_request( $scfg, "volume-snapshots", "DELETE", $params, $body );
