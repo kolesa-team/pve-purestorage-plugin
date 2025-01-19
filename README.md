@@ -141,6 +141,12 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 
 - Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach the Pure Storage array over the network. Check for firewall rules or network issues that might be blocking communication.
 - Review Logs: Check the Proxmox VE logs for any error messages related to storage or the plugin. Logs are typically found in /var/log/pve.
+  These commands are helpful for troubleshooting:
+  ```bash
+  multipath -ll -v3 #diagnose issues with the multipath service
+  iscsiadm -m node #list what iscsi nodes are mounted
+  ls -l /dev/mapper/3624a9370* #list wwids of Pure mapped devices on the system
+  ```
 - Multipath Configuration: Verify that your multipath.conf is correctly configured and that multipath devices are recognized. Use multipath -ll to list the current multipath devices.
 - API Token Permissions: Ensure that the API token used has the necessary permissions to create and manage volumes on the Pure Storage array.
 - Plugin Updates: Ensure you are using the latest version of the plugin. Check the GitHub repository for updates.
