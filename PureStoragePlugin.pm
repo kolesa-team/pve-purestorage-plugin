@@ -127,12 +127,15 @@ sub exec_command {
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_request {
-  my ( $class, $scfg, $type, $method, $params, $body ) = @_;
+  my ( $class, $scfg, $type, $method, $params, $body, $attempt ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_request\n" if $DEBUG;
 
-  my $api       = "2.26";
-  my $url       = $scfg->{ address };
-  my $check_ssl = $scfg->{ check_ssl } ? 1 : 0;
+  my $api          = "2.26";
+  my $url          = $scfg->{ address };
+  my $check_ssl    = $scfg->{ check_ssl } ? 1 : 0;
+  my $max_attempts = 5;
+  my $interval     = 1;
+  $attempt //= 1;  # Initialize the attempt counter to 1 if not provided
 
   $url .= "/api/$api/$type";
   $url .= "?$params" if $params;
@@ -141,6 +144,7 @@ sub purestorage_request {
       $type eq "login"
     ? $scfg->{ token }
     : $class->purestorage_get_auth_token( $scfg );
+
   my $headers = HTTP::Headers->new(
     ( $type eq "login" ? "api-token" : "x-auth-token" ) => $token,
     "Content-Type"                                      => "application/json"
@@ -155,13 +159,29 @@ sub purestorage_request {
     verify_hostname => 0,
     SSL_verify_mode => 0x00
   ) if !$check_ssl;
-  my $request      = HTTP::Request->new( $method, $url, $headers, $body ? encode_json( $body ) : undef );
-  my $response     = $ua->request( $request );
+
+  my $request  = HTTP::Request->new( $method, $url, $headers, $body ? encode_json( $body ) : undef );
+  my $response = $ua->request( $request );
+
   my $content_type = $response->header( "Content-Type" );
   my $content =
     defined $content_type && $content_type =~ /application\/json/ && $response->content ne ""
     ? decode_json( $response->content )
     : $response->decoded_content;
+
+  if ( !$response->is_success ) {
+    if ( $response->code == 401 && $attempt < $max_attempts ) {
+      $attempt++;
+      print "Error :: Invalid session. Retrying... Attempt: " . ( $attempt ) . "\n";
+
+      # Reset the token cache
+      $scfg->{ x_auth_token } = 0;
+
+      sleep $interval;
+      # Recursively call the function with an incremented attempt counter
+      return $class->purestorage_request( $scfg, $type, $method, $params, $body, $attempt );
+    }
+  }
 
   return {
     content => $content,
@@ -174,7 +194,7 @@ sub purestorage_get_auth_token {
   my ( $class, $scfg ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token\n" if $DEBUG;
 
-  if ( !$scfg->{ x_auth_token } ) {
+  if ( !$scfg->{ x_auth_token }) {
     my $response = $class->purestorage_request( $scfg, "login", "POST" );
 
     if ( $response->{ error } ) {
@@ -715,7 +735,7 @@ sub parse_volname {
     # ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
     return ( $vtype, $name, $vmid, undef, undef, undef, 'raw' );
   }
-  
+
   die "Error :: Invalid volume name ($volname).\n";
   return 0;
 }
