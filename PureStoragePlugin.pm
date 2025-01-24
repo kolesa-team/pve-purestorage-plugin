@@ -624,31 +624,40 @@ sub purestorage_snap_volume_create {
   return 1;
 }
 
-sub purestorage_snap_volume_rollback {
-  my ( $class, $scfg, $snap_name, $volname ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_rollback\n" if $DEBUG;
+sub purestorage_volume_restore {
+  my ( $class, $scfg, $volname, $svolname, $snap, $overwrite ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_restore\n" if $DEBUG;
 
   my $vgname = $scfg->{ vgname } || die "Error :: Volume group name is not defined.\n";
 
+  my $params = { names => "$vgname/$volname" };
+  $params->{ overwrite } = $overwrite ? 'true' : 'false' if defined $overwrite;
+
+  my $source = $svolname;
+  $source .= '.' . fix_snap_name( $snap ) if length( $snap );
+
   my $action = {
-    name   => 'restore volume snapshot',
+    name   => 'restore volume',
     type   => 'volumes',
     method => 'POST',
-    params => {
-      names     => "$vgname/$volname",
-      overwrite => 'true'
-    },
-    body => {
+    params => $params,
+    body   => {
       source => {
-        name => "$vgname/$volname." . fix_snap_name( $snap_name )
+        name => "$vgname/$source"
       }
     }
   };
 
   purestorage_api_request( $scfg, $action );
 
-  print "Info :: Volume \"$vgname/$volname\" snapshot \"$snap_name\" is restored.\n";
-  return $volname;
+  $source = length( $snap ) ? 'snapshot "' . $snap . '"' : '';
+  if ( $volname ne $svolname ) {
+    $source .= ' of ' if $source ne '';
+    $source .= 'volume "' . $svolname . '"';
+  }
+  $source = ' from ' . $source if $source ne '';
+
+  print "Info :: Volume \"$vgname/$volname\" is restored$source.\n";
 }
 
 sub purestorage_snap_volume_delete {
@@ -732,7 +741,12 @@ sub create_base {
 sub clone_image {
   my ( $class, $scfg, $storeid, $volname, $vmid, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::clone_image\n" if $DEBUG;
-  die "Error :: Cloning image is currently unimplemented.\n";
+
+  my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
+
+  $class->purestorage_volume_restore( $scfg, $name, $volname, $snap );
+
+  return $name;
 }
 
 sub find_free_diskname {
@@ -1030,7 +1044,7 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot_rollback\n" if $DEBUG;
 
-  $class->purestorage_snap_volume_rollback( $scfg, $snap, $volname );
+  $class->purestorage_volume_restore( $scfg, $volname, $volname, $snap, 1 );
 
   return 1;
 }
@@ -1050,7 +1064,7 @@ sub volume_has_feature {
 
   my $features = {
     copy       => { current => 1, snap => 1 },    # full clone is possible
-    clone      => { snap    => 1 },               # linked clone is possible
+    clone      => { current => 1, snap => 1 },    # linked clone is possible
     snapshot   => { current => 1 },               # taking a snapshot is possible
                                                   # template => { current => 1 }, # conversion to base image is possible
     sparseinit => { current => 1 },               # thin provisioning is supported
