@@ -99,21 +99,24 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.cfg`.
 
 ```
-purestorage: pure
+purestorage: <proxmox_storage_id>
   nodes: <proxmox_node_list>
   address https://<purestorage_fqdn_or_ip>
   token <purestorage_api_token>
   vgname <purestorage_volume_group_name>
+  vgsuffix <purestorage_volumegroup_or_pod_delimeter>
   hgsuffix <purestorage_host_suffix>
   content images
 ```
 
 | Parameter | Description |
 | --------- | ----------- |
+| proxmox_storage_id | Storage name in proxmox. |
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
 | address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. |
 | token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. |
 | vgname | The name of the volume group where new virtual disks will be created. This should match the configuration on your Pure Storage array. |
+| vgsuffix | (`optional`) (`default: /`)Delimeter to define Volume Group or POD storage variant. Can be `/` for Volume Group or `::` for POD |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
 
@@ -142,11 +145,13 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 - Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach the Pure Storage array over the network. Check for firewall rules or network issues that might be blocking communication.
 - Review Logs: Check the Proxmox VE logs for any error messages related to storage or the plugin. Logs are typically found in /var/log/pve.
   These commands are helpful for troubleshooting:
+
   ```bash
   multipath -ll -v3 #diagnose issues with the multipath service
   iscsiadm -m node #list what iscsi nodes are mounted
   ls -l /dev/mapper/3624a9370* #list wwids of Pure mapped devices on the system
   ```
+
 - Multipath Configuration: Verify that your multipath.conf is correctly configured and that multipath devices are recognized. Use multipath -ll to list the current multipath devices.
 - API Token Permissions: Ensure that the API token used has the necessary permissions to create and manage volumes on the Pure Storage array.
 - Plugin Updates: Ensure you are using the latest version of the plugin. Check the GitHub repository for updates.
