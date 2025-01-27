@@ -1049,15 +1049,15 @@ sub volume_has_feature {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_has_feature\n" if $DEBUG;
 
   my $features = {
-    copy     => { base    => 1, current => 1, snap => 1 },    # full clone is possible
-    clone    => { snap    => 1 },                             # linked clone is possible
-    snapshot => { current => 1 },                             # taking a snapshot is possible
-                                                              # template => { current => 1 }, # conversion to base image is possible
-                                                              # sparseinit => { base => 1, current => 1 }, # volume is sparsely initialized (thin provisioning)
-    rename   => { current => 1 },                             # renaming volumes is possible
+    copy       => { current => 1, snap => 1 },    # full clone is possible
+    clone      => { snap    => 1 },               # linked clone is possible
+    snapshot   => { current => 1 },               # taking a snapshot is possible
+                                                  # template => { current => 1 }, # conversion to base image is possible
+    sparseinit => { current => 1 },               # thin provisioning is supported
+    rename     => { current => 1 },               # renaming volumes is possible
   };
   my ( $vtype, $name, $vmid, $basename, $basevmid, $isBase ) = $class->parse_volname( $volname );
-  my $key = undef;
+  my $key;
   if ( $snapname ) {
     $key = "snap";
   } else {
