@@ -56,7 +56,7 @@ blacklist {
 }
 
 blacklist_exceptions {
-  wwid "624a9370.*"
+  wwid "3624a9370.*"
   device {
     vendor "PURE"
   }
@@ -96,11 +96,23 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 
 ## Configuration
 
-After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to manually edit the storage configuration file `/etc/pve/storage.cfg`.
+After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to open shell and use `pvesm` command to add it:
+
+```bash
+pvesm add purestorage <storage_id> \
+   --nodes <proxmox_node_list> \
+   --address https://<purestorage_fqdn_or_ip> \
+   --token token <purestorage_api_token> \
+   --vgname <purestorage_volume_group_name> \
+   --hgsuffix <purestorage_host_suffix>
+   --content images
+```
+
+Alternatively, you can manually edit the storage configuration file `/etc/pve/storage.cfg`.
 
 ```
-purestorage: pure
-  nodes: <proxmox_node_list>
+purestorage: <storage_id>
+  nodes <proxmox_node_list>
   address https://<purestorage_fqdn_or_ip>
   token <purestorage_api_token>
   vgname <purestorage_volume_group_name>
@@ -110,6 +122,7 @@ purestorage: pure
 
 | Parameter | Description |
 | --------- | ----------- |
+| storage_id | The storage identifier (name under which it will appear in the Storage list) |
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
 | address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. |
 | token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. |
