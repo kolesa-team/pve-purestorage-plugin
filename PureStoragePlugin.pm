@@ -895,7 +895,7 @@ sub map_volume {
     print "Info :: Waiting (" . $iteration . "s) for map volume \"$volname\"...\n";
     $iteration++;
     if ( -e $path ) {
-      return 1;
+      return $path;
     }
     sleep $interval;
   }
