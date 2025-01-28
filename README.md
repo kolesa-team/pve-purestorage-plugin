@@ -126,7 +126,9 @@ purestorage: <storage_id>
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
 | address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. |
 | token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. |
-| vgname | The name of the volume group where new virtual disks will be created. This should match the configuration on your Pure Storage array. |
+| vgname | (`optional`, conflicts with `podname`) The volume group name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
+| podname | (`optional`, conflicts with `vgname`) The pod name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
+| vnprefix | (`optional`) The prefix to prepend to name of virtual disks. |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
 
