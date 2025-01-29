@@ -900,8 +900,7 @@ sub map_volume {
     sleep $interval;
   }
 
-  warn "Warning :: Local path \"$path\" does not exist.\n";
-  return 0;
+  die "Error :: Local path \"$path\" does not exist.\n";
 }
 
 sub unmap_volume {
