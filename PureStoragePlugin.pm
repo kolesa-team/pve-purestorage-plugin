@@ -197,7 +197,7 @@ sub purestorage_name_prefix {
     $value = $scfg->{ $pkey };
     if ( defined( $value ) ) {
       $prefix .= $value;
-      die "Error:: Invalid \"$pkey\" parameter value \"$value\"\n" if $prefix !~ m/^\w([\w-]*\w)?((\/|::)(\w[\w-]*)?)?$/;
+      die "Error :: Invalid \"$pkey\" parameter value \"$value\"\n" if $prefix !~ m/^\w([\w-]*\w)?((\/|::)(\w[\w-]*)?)?$/;
     }
 
     $scfg->{ $ckey } = $prefix;
@@ -211,10 +211,11 @@ sub purestorage_name {
 
   my $name = length( $volname ) ? purestorage_name_prefix( $scfg ) . $volname : '';
   if ( length( $snapname ) ) {
-
-    # $snapname =~ s/_/-/g;
+    my $snap = $snapname;
+    $snap =~ s/^(veeam_)/veeam-/;    # s/_/-/g;
+    $snap = 'snap-' . $snap unless defined $1;
     $name .= '.' if $name ne '';
-    $name .= 'snap-' . $snapname;
+    $name .= $snap;
   }
 
   print 'Debug :: purestorage_name ::',
