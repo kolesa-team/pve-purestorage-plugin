@@ -894,13 +894,12 @@ sub map_volume {
     print "Info :: Waiting (" . $iteration . "s) for map volume \"$volname\"...\n";
     $iteration++;
     if ( -e $path ) {
-      return 1;
+      return $path;
     }
     sleep $interval;
   }
 
-  warn "Warning :: Local path \"$path\" does not exist.\n";
-  return 0;
+  die "Error :: Local path \"$path\" does not exist.\n";
 }
 
 sub unmap_volume {
