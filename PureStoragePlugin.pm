@@ -240,30 +240,52 @@ sub purestorage_api_request {
   my $params = prepare_api_params( $action->{ params } );
   $url .= "?$params" if length( $params );
 
-  my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
-
-  my $login = $type eq 'login';
-  if ( $login ) {
-    $headers->header( 'api-token' => $scfg->{ token } );
-  } else {
-    if ( $scfg->{ x_auth_token } ) {
-      print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token::cached\n" if $DEBUG;
-    } else {
-      print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_auth_token\n" if $DEBUG;
-      purestorage_api_request( $scfg, { name => 'Authentication', type => 'login', method => 'POST' } );
-    }
-    $headers->header( 'x-auth-token' => $scfg->{ x_auth_token } );
-  }
-  $headers->header( 'X-Request-ID' => $scfg->{ x_request_id } ) if $scfg->{ x_request_id };
-
   my $ua = LWP::UserAgent->new;
   $ua->ssl_opts(
     verify_hostname => 0,
     SSL_verify_mode => 0x00
   ) unless $scfg->{ check_ssl };
 
-  my $request      = HTTP::Request->new( $action->{ method }, $url, $headers, $action->{ body } ? encode_json( $action->{ body } ) : undef );
-  my $response     = $ua->request( $request );
+  my $body    = $action->{ body } ? encode_json( $action->{ body } ) : undef;
+  my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
+
+  my $token_status;
+  if ( $type eq 'login' ) {
+    $token_status = 0;    # login request
+    $headers->header( 'api-token' => $scfg->{ token } );
+  } elsif ( $scfg->{ x_auth_token } ) {
+    $token_status = 1;    # have cached token
+  } else {
+    $token_status = 2;    # need token
+  }
+
+  my $success;
+  my $response;
+  while ( 1 ) {
+    if ( $token_status > 0 ) {
+      if ( $token_status == 1 ) {
+        print "Debug :: Using existing session token\n" if $DEBUG;
+      } else {
+        print "Debug :: Requesting new session token\n" if $DEBUG;
+        purestorage_api_request( $scfg, { name => 'Authentication', type => 'login', method => 'POST' } );
+      }
+      $headers->header( 'x-auth-token' => $scfg->{ x_auth_token } );
+    }
+    $headers->header( 'X-Request-ID' => $scfg->{ x_request_id } ) if $scfg->{ x_request_id };
+
+    my $request = HTTP::Request->new( $action->{ method }, $url, $headers, $body );
+    $response = $ua->request( $request );
+
+    $success = $response->is_success;
+    if ( !$success && $token_status == 1 && $response->code == 401 ) {
+      print "Debug :: Session token expired\n";
+      $token_status = 2;
+      next;
+    }
+
+    last;
+  }
+
   my $content_type = $response->header( "Content-Type" );
   my $content =
     defined $content_type && $content_type =~ /application\/json/ && $response->content ne ''
@@ -272,12 +294,10 @@ sub purestorage_api_request {
 
   $content = {} if $content eq '';
 
-  my $action_name = $action->{ name } || "Action '$type' (method '" . $action->{ method } . "')";
-  my $success     = $response->is_success;
   if ( $success ) {
-    if ( $login ) {
+    if ( $token_status == 0 ) {
       $headers                = $response->headers;
-      $scfg->{ x_auth_token } = $headers->header( 'x-auth-token' ) || die "Error :: Header 'x-auth-token' is missing.";
+      $scfg->{ x_auth_token } = $headers->header( 'x-auth-token' ) or die "Error :: Header 'x-auth-token' is missing.\n";
       $scfg->{ x_request_id } = $headers->header( 'x-request-id' );
     }
   } else {
@@ -289,8 +309,8 @@ sub purestorage_api_request {
     }
 
     if ( !$success ) {
-      my $message = substr( $action_name, 0, 1 );
-      $message = $message eq uc( $message ) ? $action_name . ' failed' : 'Failed to ' . $action_name;
+      my $message = $action->{ name } || "Action '$type' (method '" . $action->{ method } . "')";
+      $message = substr( $message, 0, 1 ) eq uc( substr( $message, 0, 1 ) ) ? $message . ' failed' : 'Failed to ' . $message;
       die "Error :: PureStorage API :: $message.\n"
         . "=> Trace:\n"
         . "==> Code: "
