@@ -8,6 +8,7 @@ use Data::Dumper qw( Dumper );    # DEBUG
 use IO::File   ();
 use Net::IP    ();
 use File::Path ();
+use File::Spec ();
 
 use PVE::JSONSchema      ();
 use PVE::Network         ();
@@ -37,9 +38,10 @@ my $default_hgsuffix       = "";
 my $DEBUG = 0;
 
 my $cmd = {
-  iscsiadm  => '/usr/bin/iscsiadm',
-  multipath => '/sbin/multipath',
-  blockdev  => '/usr/sbin/blockdev'
+  iscsiadm   => '/usr/bin/iscsiadm',
+  multipath  => '/sbin/multipath',
+  multipathd => '/sbin/multipathd',
+  blockdev   => '/usr/sbin/blockdev'
 };
 
 ### BLOCK: Configuration
@@ -99,6 +101,11 @@ sub properties {
       type        => "boolean",
       default     => "no"
     },
+    protocol => {
+      description => "Set storage protocol (1 = iscsi | 2 = scsi | 3 = nvme)",
+      type        => "integer",
+      default     => 1
+    },
   };
 }
 
@@ -112,6 +119,7 @@ sub options {
     podname   => { optional => 1 },
     vnprefix  => { optional => 1 },
     check_ssl => { optional => 1 },
+    protocol  => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
@@ -133,6 +141,62 @@ sub exec_command {
     warn 'Warning' . $error;
   }
 }
+
+### Block: SCSI (Fibre Channel) subroutines
+
+sub scsi_scan_new {
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::scsi_scan_new\n" if $DEBUG;
+  my $fc_base = '/sys/class/fc_host';
+  my @fc_hosts = glob("$fc_base/*");
+
+  die "Error :: sub::scsi_scan_new did not find fibre channel hosts.\n" unless @fc_hosts;
+
+  foreach my $fc_host (@fc_hosts) {
+    next unless ($fc_host =~ m/^(\/sys\/class\/fc_host\/\w+)$/);
+    my $adapter = basename($1);
+    my $scsi_host = File::Spec->catfile("/sys/class/scsi_host/", $adapter);
+
+    if(-d $scsi_host) {
+      open my $fh, '>', File::Spec->catfile($scsi_host, "scan") or die "Error :: Cannot open file: $!";
+      print $fh "- - -\n";
+      close $fh;
+    } else {
+      warn "Warning :: SCSI host path $scsi_host does not exist.\n";
+    }
+  }
+}
+
+sub scsi_rescan_device {
+  my ($wwid) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::scsi_rescan_device\n" if $DEBUG;
+  die "Error :: sub::scsi_rescan_device did not recive a wwid.\n" unless $wwid; 
+
+  foreach my $device (glob('/sys/class/scsi_device/*')) {
+    next unless ($device =~ m/^(\/sys\/class\/scsi_device\/[\d\:\\]+)$/);
+    my $tmppath = $1;
+
+    my $wwid_file = File::Spec->catfile($tmppath, "device/wwid");
+    next unless -f $wwid_file;
+
+    open(my $wwid_fh, '<', $wwid_file) or die "Error :: Cannot open file: $!";
+    my $tmpwwid = <$wwid_fh>;
+    close($wwid_fh);
+
+    $tmpwwid =~ s/^naa\.//;
+    $tmpwwid = "3" . lc($tmpwwid);
+    chomp($tmpwwid);
+
+    if ($tmpwwid eq $wwid) {
+      open my $rescan, '>', File::Spec->catfile($tmppath, "device/rescan") or die "Error :: Cannot open file: $!";
+      print $rescan "1\n";
+      close $rescan;
+    }
+  }
+  my $param = qq{ -k"resize map $wwid"};
+  exec_command( [ $cmd->{ multipathd } . $param ], 1 );
+}
+
+### Block: Pure Storage subroutines
 
 sub prepare_api_params {
   my ( $parms ) = @_;
@@ -580,7 +644,17 @@ sub purestorage_resize_volume {
 
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
-  exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
+  my $protocol = $scfg->{ protocol };
+  if ($protocol == 1) {
+    exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
+  } elsif ($protocol == 2) {
+    scsi_rescan_device($wwid);
+  } elsif ($protocol == 3) {
+    die qq{"Error :: Protocol: "$protocol" isn't implemented yet.\n};
+  } else {
+    die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
+  }
+  
 
   # FIXME: wwid is probably ignored
   exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
@@ -904,7 +978,16 @@ sub map_volume {
 
   exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
 
-  exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
+  my $protocol = $scfg->{ protocol };
+  if ($protocol == 1) {
+    exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
+  } elsif ($protocol == 2) {
+    scsi_scan_new();
+  } elsif ($protocol == 3) {
+    die qq{"Error :: Protocol: "$protocol" isn't implemented yet.\n};
+  } else {
+    die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
+  }
 
   # Wait for the device to apear
   my $iteration    = 0;
