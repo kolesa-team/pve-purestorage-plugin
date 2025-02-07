@@ -73,7 +73,7 @@ To manually install the plugin, follow these steps:
 
 ```bash
 # Clone repository
-git clone git@github.com:kolesa-team/pve-purestorage.git
+git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
 # Navigate to the Plugin Directory
 cd pve-purestorage
 # Create the custom plugin directory if it does not already exist
@@ -102,7 +102,7 @@ After installing the plugin, you need to configure Proxmox VE to use it. Since P
 pvesm add purestorage <storage_id> \
    --nodes <proxmox_node_list> \
    --address https://<purestorage_fqdn_or_ip> \
-   --token token <purestorage_api_token> \
+   --token <purestorage_api_token> \
    --vgname <purestorage_volume_group_name> \
    --hgsuffix <purestorage_host_suffix>
    --content images
