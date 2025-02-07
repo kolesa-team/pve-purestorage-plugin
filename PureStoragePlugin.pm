@@ -40,7 +40,6 @@ my $DEBUG = 0;
 my $cmd = {
   iscsiadm   => '/usr/bin/iscsiadm',
   multipath  => '/sbin/multipath',
-  multipathd => '/sbin/multipathd',
   blockdev   => '/usr/sbin/blockdev'
 };
 
@@ -192,8 +191,7 @@ sub scsi_rescan_device {
       close $rescan;
     }
   }
-  my $param = qq{ -k"resize map $wwid"};
-  exec_command( [ $cmd->{ multipathd } . $param ], 1 );
+  exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
 }
 
 ### Block: Pure Storage subroutines
