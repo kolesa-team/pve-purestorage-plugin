@@ -938,23 +938,23 @@ sub unmap_volume {
     }
 
     my $iteration = 0;
-    my $max_attempts = 5;
+    my $max_attempts = 30;
     my $interval = 1;
     my $in_use = 1;
     my $safe_device_path = $device_path =~ m/^([\/a-zA-Z0-9_\-\.]+)$/;
 
+    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
+
     while ( $iteration < $max_attempts ) {
       print "Info :: Waiting (" . $iteration . "s) for device to no longer be in use: \"$volname\".\n";
-      $iteration++;
       if (!`fuser $safe_device_path 2>/dev/null`) {
         $in_use = 0;
         last;
       }
+      $iteration++;
       sleep $interval;
     } 
     die qq{Error :: device "$device_path" is still in use!.\n} unless(!$in_use);
-
-    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
 
     my $device_name = basename( $device_path );
     my $slaves_path = "/sys/block/$device_name/slaves";
