@@ -39,6 +39,7 @@ my $DEBUG = 0;
 my $cmd = {
   iscsiadm  => '/usr/bin/iscsiadm',
   multipath => '/sbin/multipath',
+  dmsetup   => '/usr/sbin/dmsetup',
   blockdev  => '/usr/sbin/blockdev'
 };
 
@@ -939,26 +940,6 @@ sub unmap_volume {
 
     exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
 
-    my $iteration = 0;
-    my $max_attempts = 30;
-    my $interval = 1;
-    my $in_use = 1;
-    my $safe_device_path = $device_path =~ m/^([\/a-zA-Z0-9_\-\.]+)$/;
-
-    while ( $iteration < $max_attempts ) {
-      
-      eval {run_command( [ $cmd->{ fuser }, "$safe_device_path" ], quiet => 1)};
-      if ($@) {
-        $in_use = 0;
-        last;
-      }
-
-      print qq{Warning :: Device "$volname" in use. Waiting (duration $iteration sec)\n};
-      $iteration++;
-      sleep $interval;
-    } 
-    die qq{Error :: device "$device_path" is still in use!.\n} unless(!$in_use);
-
     my $device_name = basename( $device_path );
     my $slaves_path = "/sys/block/$device_name/slaves";
 
@@ -976,6 +957,21 @@ sub unmap_volume {
     my $multipath_check = `$cmd->{ "multipath" } -l $wwid`;
     if ( $multipath_check ) {
       print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
+
+      my $iteration = 0;
+      my $max_attempts = 30;
+      my $interval = 1;
+      my $in_use = 1;
+
+      while ( $iteration++ < $max_attempts ) {
+
+        run_command( [ $cmd->{ dmsetup }, 'info', '-c', '--noheadings', '-o', 'open', $wwid ], outfunc=> sub { my $opencount = $_[0] } );
+        last unless( $opencount > 0 );
+
+        print qq{Warning :: Device "$volname" in use. Waiting (duration $iteration sec)\n};
+        sleep $interval;
+      } 
+
       exec_command( [ $cmd->{ multipath }, '-w', $wwid ] );
 
       # remove the link
