@@ -937,20 +937,23 @@ sub unmap_volume {
       die "Error :: unable to get device path for $path - $!.\n";
     }
 
+    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
+
     my $iteration = 0;
     my $max_attempts = 30;
     my $interval = 1;
     my $in_use = 1;
     my $safe_device_path = $device_path =~ m/^([\/a-zA-Z0-9_\-\.]+)$/;
 
-    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
-
     while ( $iteration < $max_attempts ) {
-      print "Info :: Waiting (" . $iteration . "s) for device to no longer be in use: \"$volname\".\n";
-      if (!`fuser $safe_device_path 2>/dev/null`) {
+      
+      eval {run_command( [ $cmd->{ fuser }, "$safe_device_path" ], quiet => 1)};
+      if ($@) {
         $in_use = 0;
         last;
       }
+
+      print qq{Warning :: Device "$volname" in use. Waiting (duration $iteration sec)\n};
       $iteration++;
       sleep $interval;
     } 
