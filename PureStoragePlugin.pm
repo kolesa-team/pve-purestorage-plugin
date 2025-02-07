@@ -958,19 +958,20 @@ sub unmap_volume {
     if ( $multipath_check ) {
       print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
 
-      my $iteration = 0;
+      my $iteration    = 0;
       my $max_attempts = 30;
-      my $interval = 1;
-      my $in_use = 1;
+      my $interval     = 1;
+      my $in_use       = 1;
+      my $opencount    = 1;
 
       while ( $iteration++ < $max_attempts ) {
 
-        run_command( [ $cmd->{ dmsetup }, 'info', '-c', '--noheadings', '-o', 'open', $wwid ], outfunc=> sub { my $opencount = $_[0] } );
-        last unless( $opencount > 0 );
+        run_command( [ $cmd->{ dmsetup }, 'info', '-c', '--noheadings', '-o', 'open', $wwid ], outfunc => sub { $opencount = $_[0] } );
+        last unless ( $opencount > 0 );
 
         print qq{Warning :: Device "$volname" in use. Waiting (duration $iteration sec)\n};
         sleep $interval;
-      } 
+      }
 
       exec_command( [ $cmd->{ multipath }, '-w', $wwid ] );
 
