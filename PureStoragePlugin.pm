@@ -226,101 +226,142 @@ sub purestorage_name {
 }
 
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
-
-my $psfa_api = "2.26";
+my $PSFA_API = "2.26";
 
 sub purestorage_api_request {
-  my ( $scfg, $action ) = @_;
+  my ( $scfg, $action, $all ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_request\n" if $DEBUG;
 
-  my $url = $scfg->{ address } or die "Error :: Pure Storage host address is not defined.\n";
+  $all //= 0;
 
-  my $type = $action->{ type };
-  $url .= '/api/' . $psfa_api . '/' . $type;
-
-  my $params = prepare_api_params( $action->{ params } );
-  $url .= "?$params" if length( $params );
-
-  my $ua = LWP::UserAgent->new;
+  my $ua = LWP::UserAgent->new( timeout => 15 );
   $ua->ssl_opts(
     verify_hostname => 0,
     SSL_verify_mode => 0x00
   ) unless $scfg->{ check_ssl };
 
-  my $body    = $action->{ body } ? encode_json( $action->{ body } ) : undef;
-  my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
+  my $type  = $action->{ type };
+  my $login = $type eq 'login' ? 1 : 0;
 
-  my $token_status;
-  if ( $type eq 'login' ) {
-    $token_status = 0;    # login request
-    $headers->header( 'api-token' => $scfg->{ token } );
-  } elsif ( $scfg->{ x_auth_token } ) {
-    $token_status = 1;    # have cached token
-  } else {
-    $token_status = 2;    # need token
-  }
+  my $params = prepare_api_params( $action->{ params } );
+  my $path   = $type;
+  $path .= '?' . $params if length( $params );
 
-  my $success;
-  my $response;
-  while ( 1 ) {
-    if ( $token_status > 0 ) {
-      if ( $token_status == 1 ) {
-        print "Debug :: Using existing session token\n" if $DEBUG;
-      } else {
-        print "Debug :: Requesting new session token\n" if $DEBUG;
-        purestorage_api_request( $scfg, { name => 'Authentication', type => 'login', method => 'POST' } );
+  my $method = $action->{ method };
+
+  my $body = $action->{ body };
+
+  my $error;
+  my $content;
+  my $url;
+
+  my @urls   = split( ',', $scfg->{ address } // '' );
+  my @tokens = split( ',', $scfg->{ token }   // '' );
+
+  foreach my $i ( 0, 1 ) {
+    $url = $urls[$i] // '';
+    my $token = $tokens[$i] // '';
+    next if $i && $url eq '' && $token eq '';
+
+    my $cf = $url eq '' ? 'address' : $token eq '' ? 'token' : '';
+    die "Error :: Pure Storage \"$cf\" parameter" . ( $i == 0 ? '' : ' for second array' ) . " is not defined.\n" unless $cf eq '';
+
+    my $config = {
+      ua         => $ua,
+      url        => $url,
+      token      => $token,
+      auth_token => $scfg->{ '_auth_token' . $i },
+      request_id => $scfg->{ '_request_id' . $i }
+    };
+
+    ( $error, $content ) = purestorage_api_request1( $config, $path, $method, $login, $body );
+    if ( $error == -1 ) {
+      $scfg->{ '_auth_token' . $i } = $config->{ auth_token };
+      $scfg->{ '_request_id' . $i } = $config->{ request_id };
+    } elsif ( $error == 1 ) {
+      my $ignore = $action->{ ignore };
+      if ( defined( $ignore ) ) {
+        $ignore = [$ignore] if ref( $ignore ) eq '';
+        my $first = $content->{ errors }->[0]->{ message };
+        $error = 0 if grep { $_ eq $first } @$ignore;
       }
-      $headers->header( 'x-auth-token' => $scfg->{ x_auth_token } );
-    }
-    $headers->header( 'X-Request-ID' => $scfg->{ x_request_id } ) if $scfg->{ x_request_id };
-
-    my $request = HTTP::Request->new( $action->{ method }, $url, $headers, $body );
-    $response = $ua->request( $request );
-
-    $success = $response->is_success;
-    if ( !$success && $token_status == 1 && $response->code == 401 ) {
-      print "Debug :: Session token expired\n";
-      $token_status = 2;
-      next;
     }
 
-    last;
+    last if $error == 1 || $error <= 0 && !$all;
   }
 
-  my $content_type = $response->header( "Content-Type" );
-  my $content =
-    defined $content_type && $content_type =~ /application\/json/ && $response->content ne ''
-    ? decode_json( $response->content )
-    : $response->decoded_content;
-
-  $content = {} if $content eq '';
-
-  if ( $success ) {
-    if ( $token_status == 0 ) {
-      $headers                = $response->headers;
-      $scfg->{ x_auth_token } = $headers->header( 'x-auth-token' ) or die "Error :: Header 'x-auth-token' is missing.\n";
-      $scfg->{ x_request_id } = $headers->header( 'x-request-id' );
-    }
-  } else {
-    my $ignore_errors = $action->{ ignore };
-    if ( defined( $ignore_errors ) ) {
-      $ignore_errors = [$ignore_errors] if ref( $ignore_errors ) eq '';
-      my $first = $content->{ errors }->[0]->{ message };
-      $success = 1 if grep { $_ eq $first } @$ignore_errors;
-    }
-
-    if ( !$success ) {
-      my $message = $action->{ name } || "Action '$type' (method '" . $action->{ method } . "')";
-      $message = substr( $message, 0, 1 ) eq uc( substr( $message, 0, 1 ) ) ? $message . ' failed' : 'Failed to ' . $message;
-      die "Error :: PureStorage API :: $message.\n"
-        . "=> Trace:\n"
-        . "==> Code: "
-        . $response->code . "\n"
-        . ( $content ? "==> Message: " . Dumper( $content ) : '' );
-    }
+  if ( $error > 0 ) {
+    my $message = $error == 3 ? 'Authentication' : $action->{ name } || "Action '$type' (method '$method')";
+    $message = substr( $message, 0, 1 ) eq uc( substr( $message, 0, 1 ) ) ? $message . ' failed' : 'Failed to ' . $message;
+    $message = 'PureStorage API :: ' . $message if $error == 1;
+    die "Error :: $message.\n" . "=> Trace:\n" . "==> address: " . $url . "\n" . ( $content ? "==> Message: " . Dumper( $content ) : '' );
   }
 
   return $content;
+}
+
+sub purestorage_api_request1 {
+  my ( $config, $path, $method, $login, $body ) = @_;
+
+  my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
+
+  my $token_state;
+  if ( $login ) {
+    $token_state = 0;    # login request
+    $headers->header( 'api-token' => $config->{ token } );
+  } elsif ( $config->{ auth_token } ) {
+    $token_state = 2;    # have cached token
+  } else {
+    $token_state = 1;    # need token
+  }
+
+  my $error;
+  my $response;
+  my $content;
+  while ( 1 ) {
+    if ( $token_state > 0 ) {
+      if ( $token_state == 1 ) {
+        print "Debug :: Requesting new session token\n" if $DEBUG;
+        ( $error, $content ) = purestorage_api_request1( $config, 'login', 'POST', 1 );
+        return ( $error, $content ) if $error > 0;
+      } else {
+        print "Debug :: Using existing session token\n" if $DEBUG;
+      }
+      $headers->header( 'x-auth-token' => $config->{ auth_token } );
+    }
+    $headers->header( 'X-Request-ID' => $config->{ request_id } ) if $config->{ request_id };
+
+    my $request = HTTP::Request->new( $method, $config->{ url } . '/api/' . $PSFA_API . '/' . $path, $headers, length( $body ) ? encode_json( $body ) : undef );
+    $response = $config->{ ua }->request( $request );
+
+    $error = $response->is_success ? 0 : 1;
+    if ( $error && $token_state == 2 && $response->code == 401 ) {
+      print "Debug :: Session token expired\n";
+      $token_state = 1;
+      next;
+    }
+    last;
+  }
+
+  $headers = $response->headers;
+  if ( $error == 0 ) {
+    if ( $token_state == 0 ) {
+      $config->{ auth_token } = $headers->header( 'x-auth-token' ) or die "Error :: PureStorage API :: Header 'x-auth-token' is missing.\n";
+      $config->{ request_id } = $headers->header( 'x-request-id' );
+    }
+    $error = -1 if $token_state < 2;    # auth_token was updated
+  }
+
+  $content = $response->decoded_content;
+  my $content_type = $headers->header( 'Content-Type' ) // '';
+  if ( $content_type =~ /application\/json/ ) {
+    $content = decode_json( $content );
+  } else {
+    $error   = $login ? 3 : 2 if $error == 1;    # non-API error (connectivity, etc.)
+    $content = { response => $content };
+  }
+
+  return ( $error, $content );
 }
 
 sub purestorage_list_volumes {
@@ -476,7 +517,7 @@ sub purestorage_volume_connection {
     }
   };
 
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_request( $scfg, $action, 1 );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
   print "Info :: Volume \"$volname\" is $message host \"$hname\".\n";
