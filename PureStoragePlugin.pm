@@ -37,9 +37,10 @@ my $default_hgsuffix       = "";
 my $DEBUG = 0;
 
 my $cmd = {
-  iscsiadm  => '/usr/bin/iscsiadm',
-  multipath => '/sbin/multipath',
-  blockdev  => '/usr/sbin/blockdev'
+  iscsiadm   => '/usr/bin/iscsiadm',
+  multipath  => '/sbin/multipath',
+  multipathd => '/sbin/multipathd',
+  blockdev   => '/usr/sbin/blockdev'
 };
 
 ### BLOCK: Configuration
@@ -124,14 +125,60 @@ sub options {
 sub exec_command {
   my ( $command, $die, %param ) = @_;
 
+  if ( $DEBUG < 3 ) {
+    $param{ 'quiet' } = 1 unless exists $param{ 'quiet' };
+  }
+
   print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
   eval { run_command( $command, %param ) };
   if ( $@ ) {
-    my $error = " :: Cannot execute '" . join( ' ', @$command ) . "'. Error :: $@\n";
+    my $error = " :: Cannot execute '" . join( ' ', @$command ) . "'\n  ==> Error :: $@\n";
     die 'Error' . $error if $die;
 
     warn 'Warning' . $error;
   }
+}
+
+sub multipath_check {
+  my ( $wwid ) = @_;
+  my $output = `$cmd->{ "multipath" } -l $wwid`;
+
+  return $output ne '';
+}
+
+sub wait_for {
+  my ( $success, $message, $timeout, $delay ) = @_;
+
+  $message = 'Debug :: Waiting for ' . $message if $DEBUG;
+
+  $timeout //= 5;
+  $delay   //= 0.1;
+
+  # Wait for the device size to update
+  my $time = 0;
+  while ( $time < $timeout ) {
+    if ( &$success() ) {
+      if ( $DEBUG && $time > 0 ) {
+        print $message if $DEBUG >= 2;
+        print ": done in $time sec\n";
+      }
+      return 1;
+    }
+
+    if ( $DEBUG && $time == 0 ) {
+      print $message;
+      print "\n" if $DEBUG >= 2;
+    }
+
+    select( undef, undef, undef, $delay );
+
+    $time += $delay;
+  }
+
+  print $message                      if $DEBUG >= 2;
+  print ": timeout after $time sec\n" if $DEBUG;
+
+  return 0;
 }
 
 sub prepare_api_params {
@@ -469,23 +516,6 @@ sub purestorage_unmap_disk {
   return 1;
 }
 
-sub purestorage_cleanup_diskmap {
-  my ( $class ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_cleanup_diskmap\n" if $DEBUG;
-
-  my @disks = `lsblk -o NAME,TYPE,SIZE -nr`;
-
-  foreach my $disk_name ( @disks ) {
-    my ( $name, $type, $size ) = split( /\s+/, $disk_name );
-
-    if ( $type eq 'disk' && $size eq '0B' ) {
-      $class->purestorage_unmap_disk( $name );
-    }
-  }
-
-  return 1;
-}
-
 sub purestorage_volume_connection {
   my ( $class, $scfg, $volname, $mode ) = @_;
 
@@ -623,28 +653,21 @@ sub purestorage_resize_volume {
 
   exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
 
-  # FIXME: wwid is probably ignored
-  exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
-
-  # Wait for the device size to update
-  my $iteration    = 0;
-  my $max_attempts = 15;    # Max iter count
-  my $interval     = 1;     # Interval for checking in seconds
-  my $new_size     = 0;
+  exec_command( [ $cmd->{ multipathd }, 'resize', 'map', $wwid ], 1 );
 
   print "Debug :: Expected size = $size\n" if $DEBUG;
 
-  while ( $iteration < $max_attempts ) {
-    print "Info :: Waiting (" . $iteration . "s) for size update for volume \"$volname\"...\n";
-
+  my $new_size;
+  my $updated_size = sub {
     $new_size = $class->purestorage_get_device_size( $path );
-    if ( $new_size >= $size ) {
-      print "Info :: New size detected for volume \"$volname\": $new_size bytes.\n";
-      return $new_size;
-    }
+    return $new_size >= $size;
+  };
 
-    sleep $interval;
-    ++$iteration;
+  # Wait for the device size to update
+  # FIXME: With `multipathd resize map` we may not need to wait
+  if ( wait_for( $updated_size, "volume \"$volname\" size update" ) ) {
+    print "Info :: New size detected for volume \"$volname\": $new_size bytes.\n";
+    return $new_size;
   }
 
   die "Error :: Timeout while waiting for updated size of volume \"$volname\".\n";
@@ -909,9 +932,6 @@ sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_storage\n" if $DEBUG;
 
-  #FIXME: Why is this needed?
-  $class->purestorage_cleanup_diskmap();
-
   return 1;
 }
 
@@ -943,22 +963,19 @@ sub map_volume {
 
   print "Debug :: Mapping volume \"$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
 
-  exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
-
   exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
 
-  # Wait for the device to apear
-  my $iteration    = 0;
-  my $max_attempts = 15;
-  my $interval     = 1;
+  my $path_exists = sub {
+    return -e $path;
+  };
 
-  while ( $iteration < $max_attempts ) {
-    print "Info :: Waiting (" . $iteration . "s) for map volume \"$volname\"...\n";
-    $iteration++;
-    if ( -e $path ) {
-      return $path;
-    }
-    sleep $interval;
+  # Wait for the device to appear
+  if ( wait_for( $path_exists, "volume \"$volname\" to map" ) ) {
+
+    # we might end up with operational disk but without multipathing, e.g.
+    # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
+    exec_command( [ $cmd->{ multipathd }, 'add', 'map', $wwid ], 1 ) unless multipath_check( $wwid );
+    return $path;
   }
 
   die "Error :: Local path \"$path\" does not exist.\n";
@@ -994,13 +1011,11 @@ sub unmap_volume {
       push @slaves, $1;
     }
 
-    my $multipath_check = `$cmd->{ "multipath" } -l $wwid`;
-    if ( $multipath_check ) {
+    if ( multipath_check( $wwid ) ) {
       print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
-      exec_command( [ $cmd->{ multipath }, '-w', $wwid ] );
 
       # remove the link
-      exec_command( [ $cmd->{ multipath }, '-f', $wwid ] );
+      exec_command( [ $cmd->{ multipathd }, 'remove', 'map', $wwid ], 1 );
     } else {
       print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
     }
