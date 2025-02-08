@@ -32,18 +32,11 @@ $Data::Dumper::Terse  = 1;    # Removes `$VAR1 =` in output
 $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
-my $purestorage_wwn_prefix = '624a9370';
-my $default_hgsuffix       = '';
+my $purestorage_wwn_prefix = '3624a9370';
+my $default_hgsuffix       = "";
 my $default_protocol       = 'iscsi';
 
 my $DEBUG = 0;
-
-my $cmd = {
-  iscsiadm   => '/usr/bin/iscsiadm',
-  multipath  => '/sbin/multipath',
-  multipathd => '/sbin/multipathd',
-  blockdev   => '/usr/sbin/blockdev'
-};
 
 ### BLOCK: Configuration
 sub api {
@@ -130,21 +123,38 @@ sub options {
 
 ### BLOCK: Supporting functions
 
+my $cmd = {
+  fuser      => '/usr/bin/fuser',
+  iscsiadm   => '/usr/bin/iscsiadm',
+  multipath  => '/sbin/multipath',
+  multipathd => '/sbin/multipathd',
+  blockdev   => '/usr/sbin/blockdev'
+};
+
 sub exec_command {
-  my ( $command, $die, %param ) = @_;
+  my ( $command, $dm, %param ) = @_;
+
+  $dm //= 1;
+
+  my $fc = $cmd->{ $command->[0] };
+  $command->[0] = $fc if defined $fc;
+
+  print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
 
   if ( $DEBUG < 3 ) {
     $param{ 'quiet' } = 1 unless exists $param{ 'quiet' };
   }
 
-  print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
   eval { run_command( $command, %param ) };
   if ( $@ ) {
     my $error = " :: Cannot execute '" . join( ' ', @$command ) . "'\n  ==> Error :: $@\n";
-    die 'Error' . $error if $die;
+    die 'Error' . $error if $dm > 0;
 
-    warn 'Warning' . $error;
+    warn 'Warning' . $error unless $dm < 0;
+    return $dm < 0;
   }
+
+  return $dm >= 0;
 }
 
 sub scsi_scan_new {
@@ -195,7 +205,6 @@ sub scsi_rescan_device {
       close $rescan;
     }
   }
-  exec_command( [ $cmd->{ multipath }, '-r', $wwid ], 1 );
 }
 
 sub multipath_check {
@@ -208,7 +217,7 @@ sub multipath_check {
 sub wait_for {
   my ( $success, $message, $timeout, $delay ) = @_;
 
-  $message = 'Debug :: Waiting for ' . $message if $DEBUG;
+  my $debug = 'Debug :: Waiting for ' . $message;
 
   $timeout //= 5;
   $delay   //= 0.1;
@@ -218,14 +227,14 @@ sub wait_for {
   while ( $time < $timeout ) {
     if ( &$success() ) {
       if ( $DEBUG && $time > 0 ) {
-        print $message if $DEBUG >= 2;
+        print $debug if $DEBUG >= 2;
         print ": done in $time sec\n";
       }
       return 1;
     }
 
     if ( $DEBUG && $time == 0 ) {
-      print $message;
+      print $debug;
       print "\n" if $DEBUG >= 2;
     }
 
@@ -234,10 +243,10 @@ sub wait_for {
     $time += $delay;
   }
 
-  print $message                      if $DEBUG >= 2;
+  print $debug                        if $DEBUG >= 2;
   print ": timeout after $time sec\n" if $DEBUG;
 
-  return 0;
+  die "Error :: Timeout while waiting for $message\n";
 }
 
 sub prepare_api_params {
@@ -543,15 +552,17 @@ sub purestorage_get_wwn {
   if ( $volume ) {
 
     # Construct the WWN path
-    my $path = lc( "/dev/disk/by-id/wwn-0x" . $purestorage_wwn_prefix . $volume->{ serial } );
-    my $wwn  = lc( "3" . $purestorage_wwn_prefix . $volume->{ serial } );
+    my $wwn  = lc( $purestorage_wwn_prefix . $volume->{ serial } );
+    my $path = '/dev/disk/by-id/wwn-0x' . substr( $wwn, -32 );
     return ( $path, $wwn );
   }
+
+  warn "Warning :: Can't get WWN for volume \"$volname\"\n";
   return ( '', '' );
 }
 
 sub purestorage_unmap_disk {
-  my ( $class, $disk_name ) = @_;
+  my ( $disk_name ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_unmap_disk\n" if $DEBUG;
 
   if ( $disk_name =~ m|^(sd[a-z]+)$| ) {
@@ -559,8 +570,8 @@ sub purestorage_unmap_disk {
     my $sysfs_path = "/sys/block/$disk_name";
     my $disk_path  = "/dev/$disk_name";
 
-    if ( -e $disk_path ) {
-      exec_command( [ $cmd->{ blockdev }, '--flushbufs', $disk_path ] );
+    if ( -b $disk_path ) {
+      exec_command( [ 'blockdev', '--flushbufs', $disk_path ] );
     }
 
     my $fh;
@@ -680,7 +691,7 @@ sub purestorage_get_device_size {
   my $size = 0;
 
   exec_command(
-    [ $cmd->{ blockdev }, '--getsize64', $path ],
+    [ 'blockdev', '--getsize64', $path ],
     1,
     outfunc => sub {
       $size = $_[0];
@@ -712,7 +723,7 @@ sub purestorage_resize_volume {
 
   my $protocol = $scfg->{ protocol } // $default_protocol;
   if ( $protocol eq 'iscsi' ) {
-    exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
+    exec_command( [ 'iscsiadm', '--mode', 'node', '--rescan' ] );
   } elsif ( $protocol eq 'fc' ) {
     scsi_rescan_device( $wwid );
   } elsif ( $protocol eq 'nvme' ) {
@@ -721,7 +732,7 @@ sub purestorage_resize_volume {
     die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
   }
 
-  exec_command( [ $cmd->{ multipathd }, 'resize', 'map', $wwid ], 1 );
+  exec_command( [ 'multipathd', 'resize', 'map', $wwid ] );
 
   print "Debug :: Expected size = $size\n" if $DEBUG;
 
@@ -733,12 +744,11 @@ sub purestorage_resize_volume {
 
   # Wait for the device size to update
   # FIXME: With `multipathd resize map` we may not need to wait
-  if ( wait_for( $updated_size, "volume \"$volname\" size update" ) ) {
-    print "Info :: New size detected for volume \"$volname\": $new_size bytes.\n";
-    return $new_size;
-  }
+  wait_for( $updated_size, "volume \"$volname\" size update" );
 
-  die "Error :: Timeout while waiting for updated size of volume \"$volname\".\n";
+  print "Info :: New size detected for volume \"$volname\": $new_size bytes.\n";
+
+  return $new_size;
 }
 
 sub purestorage_rename_volume {
@@ -1033,7 +1043,7 @@ sub map_volume {
 
   my $protocol = $scfg->{ protocol } // $default_protocol;
   if ( $protocol eq 'iscsi' ) {
-    exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
+    exec_command( [ 'iscsiadm', '--mode', 'session', '--rescan' ] );
   } elsif ( $protocol eq 'fc' ) {
     scsi_scan_new();
   } elsif ( $protocol eq 'nvme' ) {
@@ -1047,72 +1057,69 @@ sub map_volume {
   };
 
   # Wait for the device to appear
-  if ( wait_for( $path_exists, "volume \"$volname\" to map" ) ) {
+  wait_for( $path_exists, "volume \"$volname\" to map" );
 
-    # we might end up with operational disk but without multipathing, e.g.
-    # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
-    exec_command( [ $cmd->{ multipathd }, 'add', 'map', $wwid ], 1 ) unless multipath_check( $wwid );
-    return $path;
-  }
-
-  die "Error :: Local path \"$path\" does not exist.\n";
+  # we might end up with operational disk but without multipathing, e.g.
+  # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
+  exec_command( [ 'multipathd', 'add', 'map', $wwid ] ) unless multipath_check( $wwid );
+  return $path;
 }
 
 sub unmap_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::unmap_volume\n" if $DEBUG;
 
-  my ( $path, undef, undef, $wwid ) = $class->filesystem_path( $scfg, $volname );
+  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
-  if ( $path && -b $path ) {
-    my $device_path = abs_path( $path );
-    if ( defined( $device_path ) ) {
-      print "Info :: Device path resolved to \"$device_path\".\n";
-    } else {
-      die "Error :: unable to get device path for $path - $!.\n";
-    }
+  return 0 unless $path ne '' && -b $path;
 
-    exec_command( [ $cmd->{ blockdev }, '--flushbufs', $path ] );
+  my $device_path = abs_path( $path );
 
-    my $device_name = basename( $device_path );
-    my $slaves_path = "/sys/block/$device_name/slaves";
+  die "Error :: Can't resolve device path for $path\n" unless $device_path =~ /^([\/a-zA-Z0-9_\-\.]+)$/;
+  $device_path = $1;    # untaint
 
-    my @slaves = ();
-    if ( -d $slaves_path ) {
-      opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
-      @slaves = grep { !/^\.\.?$/ } readdir( $dh );
-      closedir( $dh );
-      print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
-    } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
-      warn "Warning :: Disk \"$device_name\" has no slaves.\n";
-      push @slaves, $1;
-    }
+  print "Info :: Device path resolved to \"$device_path\".\n";
+  die "Error :: '$device_path' is not a block device\n" unless -b $device_path;
 
-    if ( multipath_check( $wwid ) ) {
-      print "Info :: Device \"$device_path\" is a multipath device. Proceeding with multipath removal.\n";
+  exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
 
-      # remove the link
-      exec_command( [ $cmd->{ multipathd }, 'remove', 'map', $wwid ], 1 );
-    } else {
-      print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
-    }
+  # this may help if there is a write-back cache (see issue #47)
+  ## my $fuser = sub {
+  ##   return exec_command( [ 'fuser', '-s', $device_path ], -1 );
+  ## };
+  ## wait_for( $fuser, 'device cache flush', 30, 0.5 );
 
-    # Iterate through slaves and delete each device
-    foreach my $slave_name ( @slaves ) {
-      print "Info :: Remove slave: $slave_name\n" if $DEBUG;
-      if ( $slave_name =~ m|^(sd[a-z]+)$| ) {
-        $slave_name = $1;    # untaint;
-        $class->purestorage_unmap_disk( $slave_name );
-      } else {
-        die "Error :: Invalid disk name \"$slave_name\".";
-      }
-    }
+  my $device_name = basename( $device_path );
+  my $slaves_path = "/sys/block/$device_name/slaves";
 
-    print "Info :: Device \"$device_name\" removed from system.\n";
-    return 1;
+  my @slaves = ();
+  if ( -d $slaves_path ) {
+    opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
+    @slaves = grep { !/^\.\.?$/ } readdir( $dh );
+    closedir( $dh );
+    print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
+  } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
+    warn "Warning :: Disk \"$device_name\" has no slaves.\n";
+    push @slaves, $1;
   }
 
-  return 0;
+  if ( multipath_check( $wwid ) ) {
+    print "Info :: Device \"$wwid\" is a multipath device. Proceeding with multipath removal.\n";
+
+    # remove the link
+    exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
+  } else {
+    print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
+  }
+
+  # Iterate through slaves and delete each device
+  foreach my $slave_name ( @slaves ) {
+    print "Info :: Remove slave: $slave_name\n" if $DEBUG;
+    purestorage_unmap_disk( $slave_name );
+  }
+
+  print "Info :: Device \"$device_name\" is removed.\n";
+  return 1;
 }
 
 sub activate_volume {
