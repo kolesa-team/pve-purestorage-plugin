@@ -101,9 +101,9 @@ sub properties {
       default     => "no"
     },
     protocol => {
-      description => "Set storage protocol (1 = iscsi | 2 = scsi | 3 = nvme)",
-      type        => "integer",
-      default     => 1
+      description => "Set storage protocol ( iscsi | fc | nvme )",
+      type        => "string",
+      default     => "iscsi"
     },
   };
 }
@@ -643,12 +643,12 @@ sub purestorage_resize_volume {
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
   my $protocol = $scfg->{ protocol };
-  if ( $protocol == 1 ) {
+  if ( $protocol eq 'iscsi' ) {
     exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
-  } elsif ( $protocol == 2 ) {
+  } elsif ( $protocol eq 'fc' ) {
     scsi_rescan_device( $wwid );
-  } elsif ( $protocol == 3 ) {
-    die qq{"Error :: Protocol: "$protocol" isn't implemented yet.\n};
+  } elsif ( $protocol eq 'nvme' ) {
+    die qq{Error :: Protocol: "$protocol" isn't implemented yet.\n};
   } else {
     die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
   }
@@ -976,12 +976,12 @@ sub map_volume {
   exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
 
   my $protocol = $scfg->{ protocol };
-  if ( $protocol == 1 ) {
+  if ( $protocol eq 'iscsi' ) {
     exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
-  } elsif ( $protocol == 2 ) {
+  } elsif ( $protocol eq 'fc' ) {
     scsi_scan_new();
-  } elsif ( $protocol == 3 ) {
-    die qq{"Error :: Protocol: "$protocol" isn't implemented yet.\n};
+  } elsif ( $protocol eq 'nvme' ) {
+    die qq{Error :: Protocol: "$protocol" isn't implemented yet.\n};
   } else {
     die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
   }
