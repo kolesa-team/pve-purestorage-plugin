@@ -32,8 +32,9 @@ $Data::Dumper::Terse  = 1;    # Removes `$VAR1 =` in output
 $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
-my $purestorage_wwn_prefix = "624a9370";
-my $default_hgsuffix       = "";
+my $purestorage_wwn_prefix = '624a9370';
+my $default_hgsuffix       = '';
+my $default_protocol       = 'iscsi';
 
 my $DEBUG = 0;
 
@@ -76,34 +77,34 @@ sub properties {
   return {
     hgsuffix => {
       description => "Host group suffx.",
-      type        => "string",
+      type        => 'string',
       default     => $default_hgsuffix
     },
     address => {
       description => "PureStorage Management IP address or DNS name.",
-      type        => "string"
+      type        => 'string'
     },
     token => {
       description => "Storage API token.",
-      type        => "string"
+      type        => 'string'
     },
     podname => {
-      description => 'PureStorage pod name',
+      description => "PureStorage pod name",
       type        => 'string'
     },
     vnprefix => {
-      description => 'Prefix to add to volume name before sending it to PureStorage array',
+      description => "Prefix to add to volume name before sending it to PureStorage array",
       type        => 'string'
     },
     check_ssl => {
       description => "Verify the server's TLS certificate",
-      type        => "boolean",
-      default     => "no"
+      type        => 'boolean',
+      default     => 'no'
     },
     protocol => {
       description => "Set storage protocol ( iscsi | fc | nvme )",
-      type        => "string",
-      default     => "iscsi"
+      type        => 'string',
+      default     => $default_protocol
     },
   };
 }
@@ -642,7 +643,7 @@ sub purestorage_resize_volume {
 
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
-  my $protocol = $scfg->{ protocol };
+  my $protocol = $scfg->{ protocol } // $default_protocol;
   if ( $protocol eq 'iscsi' ) {
     exec_command( [ $cmd->{ iscsiadm }, '--mode', 'node', '--rescan' ], 1 );
   } elsif ( $protocol eq 'fc' ) {
@@ -975,7 +976,7 @@ sub map_volume {
 
   exec_command( [ $cmd->{ multipath }, '-a', $wwid ], 1 );
 
-  my $protocol = $scfg->{ protocol };
+  my $protocol = $scfg->{ protocol } // $default_protocol;
   if ( $protocol eq 'iscsi' ) {
     exec_command( [ $cmd->{ iscsiadm }, '--mode', 'session', '--rescan' ], 1 );
   } elsif ( $protocol eq 'fc' ) {
