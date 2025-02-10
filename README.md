@@ -131,6 +131,7 @@ purestorage: <storage_id>
 | vnprefix | (`optional`) The prefix to prepend to name of virtual disks. |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
+| protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, fc) |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
 
