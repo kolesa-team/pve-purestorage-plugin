@@ -8,7 +8,6 @@ use Data::Dumper qw( Dumper );    # DEBUG
 use IO::File   ();
 use Net::IP    ();
 use File::Path ();
-use File::Spec ();
 
 use PVE::JSONSchema      ();
 use PVE::Network         ();
@@ -32,6 +31,7 @@ $Data::Dumper::Terse  = 1;    # Removes `$VAR1 =` in output
 $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
+my $PSFA_API               = '2.26';
 my $purestorage_wwn_prefix = '3624a9370';
 my $default_hgsuffix       = "";
 my $default_protocol       = 'iscsi';
@@ -124,8 +124,8 @@ sub options {
 ### BLOCK: Supporting functions
 
 my $cmd = {
-  fuser      => '/usr/bin/fuser',
-  iscsiadm   => '/usr/bin/iscsiadm',
+
+  #  fuser      => '/usr/bin/fuser',
   multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
   blockdev   => '/usr/sbin/blockdev'
@@ -158,58 +158,38 @@ sub exec_command {
 }
 
 sub scsi_scan_new {
+  my ( $protocol ) = @_;
+
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::scsi_scan_new\n" if $DEBUG;
-  my $fc_base  = '/sys/class/fc_host';
-  my @fc_hosts = glob( "$fc_base/*" );
 
-  die "Error :: sub::scsi_scan_new did not find fibre channel hosts.\n" unless @fc_hosts;
+  my $path = '/sys/class/' . $protocol . '_host';
+  opendir( my $dh, $path ) or die "Cannot open directory: $!";
+  my @hosts = grep { !/^\.\.?$/ } readdir( $dh );
+  closedir( $dh );
 
-  foreach my $fc_host ( @fc_hosts ) {
-    next unless ( $fc_host =~ m/^(\/sys\/class\/fc_host\/\w+)$/ );
-    my $adapter   = basename( $1 );
-    my $scsi_host = File::Spec->catfile( "/sys/class/scsi_host/", $adapter );
-
-    if ( -d $scsi_host ) {
-      open my $fh, '>', File::Spec->catfile( $scsi_host, "scan" ) or die "Error :: Cannot open file: $!";
-      print $fh "- - -\n";
-      close $fh;
+  my $count = 0;
+  foreach my $host ( @hosts ) {
+    next unless $host =~ /^(\w+)$/;
+    $path = '/sys/class/scsi_host/' . $1;    # untaint
+    if ( -d $path ) {
+      device_op($path, 'scan', '- - -');
+      ++$count;
     } else {
-      warn "Warning :: SCSI host path $scsi_host does not exist.\n";
+      warn "Warning :: SCSI host path $path does not exist.\n";
     }
   }
-}
 
-sub scsi_rescan_device {
-  my ( $wwid ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::scsi_rescan_device\n" if $DEBUG;
-  die "Error :: sub::scsi_rescan_device did not recive a wwid.\n" unless $wwid;
+  die "Error :: Did not find hosts to scan.\n" unless $count > 0;
 
-  foreach my $device ( glob( '/sys/class/scsi_device/*' ) ) {
-    next unless ( $device =~ m/^(\/sys\/class\/scsi_device\/[\d\:\\]+)$/ );
-    my $tmppath = $1;
-
-    my $wwid_file = File::Spec->catfile( $tmppath, "device/wwid" );
-    next unless -f $wwid_file;
-
-    open( my $wwid_fh, '<', $wwid_file ) or die "Error :: Cannot open file: $!";
-    my $tmpwwid = <$wwid_fh>;
-    close( $wwid_fh );
-
-    $tmpwwid =~ s/^naa\.//;
-    $tmpwwid = "3" . lc( $tmpwwid );
-    chomp( $tmpwwid );
-
-    if ( $tmpwwid eq $wwid ) {
-      open my $rescan, '>', File::Spec->catfile( $tmppath, "device/rescan" ) or die "Error :: Cannot open file: $!";
-      print $rescan "1\n";
-      close $rescan;
-    }
-  }
+  print "Debug :: Scanned $count host" . ( $count > 1 ? 's' : '' ) . " for new devices\n" if $DEBUG;
 }
 
 sub multipath_check {
   my ( $wwid ) = @_;
-  my $output = `$cmd->{ "multipath" } -l $wwid`;
+
+  # TODO: Find a better check
+  # TODO: Support non-multipath mode
+  my $output = `$cmd->{ multipath } -l $wwid`;
 
   return $output ne '';
 }
@@ -340,8 +320,96 @@ sub purestorage_name {
   return $name;
 }
 
+sub get_device_path_wwn {
+  my ( $serial ) = @_;
+
+  die "Error :: Volume serial is missing" unless length( $serial );
+
+  # Construct the WWN path
+  my $wwn  = lc( $purestorage_wwn_prefix . $serial );
+  my $path = '/dev/disk/by-id/wwn-0x' . substr( $wwn, -32 );
+  return ( $path, $wwn );
+}
+
+sub get_device_size {
+  my ( $path ) = @_;
+  print "Debug :: get_device_size($path)\n" if $DEBUG;
+  my $size = 0;
+
+  exec_command(
+    [ 'blockdev', '--getsize64', $path ],
+    1,
+    outfunc => sub {
+      $size = $_[0];
+      chomp $size;
+    }
+  );
+
+  print "Debug :: Detected size: $size\n" if $DEBUG;
+  return $size;
+}
+
+sub device_op {
+  my ( $device_path, $op, $value ) = @_;
+
+  open( my $fh, '>', $device_path . '/' . $op ) or die "Could not open file \"$device_path/$op\" for writing.\n";
+  print $fh $value;
+  close( $fh );
+}
+
+sub block_device_action {
+  my ( $action, @devices ) = @_;
+  print "Debug :: block_device_action($action,@devices)\n" if $DEBUG;
+
+  foreach my $device ( @devices ) {
+    if ( $device !~ /^(sd[a-z]+)$/ ) {
+      warn "Warning :: Unexpected device name in block_device_action() => $action $device)\n";
+      next;
+    }
+    $device = $1;    # untaint
+    my $device_path = '/sys/block/' . $device . '/device';
+    if ( $action eq 'remove' ) {
+      print "Debug :: Removing device: $device\n" if $DEBUG;
+      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ] );
+      device_op( $device_path, 'state',  'offline' );
+      device_op( $device_path, 'delete', '1' );
+    } elsif ( $action eq 'rescan' ) {
+      print "Debug :: Rescanning: $device\n" if $DEBUG;
+      device_op( $device_path, 'rescan', '1' );
+    } else {
+      die "Error :: Unsuported acitonin block_device_action() => $action\n";
+    }
+  }
+}
+
+sub block_device_slaves {
+  my ( $path ) = @_;
+
+  my $device_path = abs_path( $path );
+  die "Error :: Can't resolve device path for $path\n" unless $device_path =~ /^([\/a-zA-Z0-9_\-\.]+)$/;
+  $device_path = $1;    # untaint
+
+  print "Debug :: Device path resolved to \"$device_path\".\n" if $DEBUG;
+
+  my $device_name = basename( $device_path );
+  my $slaves_path = '/sys/block/' . $device_name . '/slaves';
+
+  my @slaves;
+  if ( -d $slaves_path ) {
+    opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
+    @slaves = grep { !/^\.\.?$/ } readdir( $dh );
+    closedir( $dh );
+  }
+  if ( @slaves ) {
+    print "Debug :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
+  } else {
+    warn "Warning :: Disk \"$device_name\" has no slaves.\n";
+    push @slaves, $device_name;
+  }
+  return $device_path, @slaves;
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
-my $PSFA_API = "2.26";
 
 sub purestorage_api_request {
   my ( $scfg, $action, $all ) = @_;
@@ -549,41 +617,10 @@ sub purestorage_get_wwn {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_wwn\n" if $DEBUG;
 
   my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
-  if ( $volume ) {
+  return get_device_path_wwn( $volume->{ serial } ) if $volume;
 
-    # Construct the WWN path
-    my $wwn  = lc( $purestorage_wwn_prefix . $volume->{ serial } );
-    my $path = '/dev/disk/by-id/wwn-0x' . substr( $wwn, -32 );
-    return ( $path, $wwn );
-  }
-
-  warn "Warning :: Can't get WWN for volume \"$volname\"\n";
+  warn "Warning :: Can't get volume \"$volname\" info\n";
   return ( '', '' );
-}
-
-sub purestorage_unmap_disk {
-  my ( $disk_name ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_unmap_disk\n" if $DEBUG;
-
-  if ( $disk_name =~ m|^(sd[a-z]+)$| ) {
-    $disk_name = $1;    # untaint;
-    my $sysfs_path = "/sys/block/$disk_name";
-    my $disk_path  = "/dev/$disk_name";
-
-    if ( -b $disk_path ) {
-      exec_command( [ 'blockdev', '--flushbufs', $disk_path ] );
-    }
-
-    my $fh;
-    open( $fh, ">", $sysfs_path . "/device/state" ) or die "Could not open file \"$sysfs_path/device/state\" for writing.\n";
-    print $fh "offline";
-    close( $fh );
-
-    open( $fh, ">", $sysfs_path . "/device/delete" ) or die "Could not open file \"$sysfs_path/device/delete\" for writing.\n";
-    print $fh "1";
-    close( $fh );
-  }
-  return 1;
 }
 
 sub purestorage_volume_connection {
@@ -685,24 +722,6 @@ sub purestorage_remove_volume {
   return 1;
 }
 
-sub purestorage_get_device_size {
-  my ( $class, $path ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_get_device_size\n" if $DEBUG;
-  my $size = 0;
-
-  exec_command(
-    [ 'blockdev', '--getsize64', $path ],
-    1,
-    outfunc => sub {
-      $size = $_[0];
-      chomp $size;
-    }
-  );
-
-  print "Debug :: Detected size: $size\n" if $DEBUG;
-  return $size;
-}
-
 sub purestorage_resize_volume {
   my ( $class, $scfg, $volname, $size ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_resize_volume\n" if $DEBUG;
@@ -715,38 +734,39 @@ sub purestorage_resize_volume {
     body   => { provisioned => $size }
   };
 
-  purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_request( $scfg, $action );
 
-  print "Info :: Volume \"$volname\" is resized.\n";
+  my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
 
-  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
+  my ( $path, $wwid ) = get_device_path_wwn( $serial );
 
-  my $protocol = $scfg->{ protocol } // $default_protocol;
-  if ( $protocol eq 'iscsi' ) {
-    exec_command( [ 'iscsiadm', '--mode', 'node', '--rescan' ] );
-  } elsif ( $protocol eq 'fc' ) {
-    scsi_rescan_device( $wwid );
-  } elsif ( $protocol eq 'nvme' ) {
-    die qq{Error :: Protocol: "$protocol" isn't implemented yet.\n};
-  } else {
-    die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
+  # return early if the volume is not mapped (normally should not happen)
+  return $size unless $path ne '' && -b $path;
+
+  my ( $device_path, @slaves ) = block_device_slaves( $path );
+
+  # Iterate through slaves and rescan each device
+  block_device_action( 'rescan', @slaves );
+
+  if ( multipath_check( $wwid ) ) {
+    print "Debug :: Device \"$wwid\" is a multipath device. Proceeding with resizing.\n" if $DEBUG;
+    exec_command( [ 'multipathd', 'resize', 'map', $wwid ] );
   }
-
-  exec_command( [ 'multipathd', 'resize', 'map', $wwid ] );
 
   print "Debug :: Expected size = $size\n" if $DEBUG;
 
   my $new_size;
   my $updated_size = sub {
-    $new_size = $class->purestorage_get_device_size( $path );
+    $new_size = get_device_size( $device_path );
     return $new_size >= $size;
   };
 
-  # Wait for the device size to update
-  # FIXME: With `multipathd resize map` we may not need to wait
+  # FIXME: With the current implementation we may not need to wait
   wait_for( $updated_size, "volume \"$volname\" size update" );
 
-  print "Info :: New size detected for volume \"$volname\": $new_size bytes.\n";
+  print "Debug :: New size detected for volume \"$volname\": $new_size bytes.\n" if $DEBUG;
+
+  print "Info :: Volume \"$volname\" is resized.\n";
 
   return $new_size;
 }
@@ -1042,14 +1062,12 @@ sub map_volume {
   print "Debug :: Mapping volume \"$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
 
   my $protocol = $scfg->{ protocol } // $default_protocol;
-  if ( $protocol eq 'iscsi' ) {
-    exec_command( [ 'iscsiadm', '--mode', 'session', '--rescan' ] );
-  } elsif ( $protocol eq 'fc' ) {
-    scsi_scan_new();
+  if ( $protocol eq 'iscsi' || $protocol eq 'fc' ) {
+    scsi_scan_new( $protocol );
   } elsif ( $protocol eq 'nvme' ) {
-    die qq{Error :: Protocol: "$protocol" isn't implemented yet.\n};
+    die "Error :: Protocol: \"$protocol\" isn't implemented yet.\n";
   } else {
-    die qq{Error :: Protocol: "$protocol" isn't a valid protocol.\n};
+    die "Error :: Protocol: \"$protocol\" isn't a valid protocol.\n";
   }
 
   my $path_exists = sub {
@@ -1062,6 +1080,7 @@ sub map_volume {
   # we might end up with operational disk but without multipathing, e.g.
   # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
   exec_command( [ 'multipathd', 'add', 'map', $wwid ] ) unless multipath_check( $wwid );
+
   return $path;
 }
 
@@ -1070,16 +1089,9 @@ sub unmap_volume {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::unmap_volume\n" if $DEBUG;
 
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
-
   return 0 unless $path ne '' && -b $path;
 
-  my $device_path = abs_path( $path );
-
-  die "Error :: Can't resolve device path for $path\n" unless $device_path =~ /^([\/a-zA-Z0-9_\-\.]+)$/;
-  $device_path = $1;    # untaint
-
-  print "Info :: Device path resolved to \"$device_path\".\n";
-  die "Error :: '$device_path' is not a block device\n" unless -b $device_path;
+  my ( $device_path, @slaves ) = block_device_slaves( $path );
 
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
 
@@ -1089,36 +1101,19 @@ sub unmap_volume {
   ## };
   ## wait_for( $fuser, 'device cache flush', 30, 0.5 );
 
-  my $device_name = basename( $device_path );
-  my $slaves_path = "/sys/block/$device_name/slaves";
-
-  my @slaves = ();
-  if ( -d $slaves_path ) {
-    opendir( my $dh, $slaves_path ) or die "Cannot open directory: $!";
-    @slaves = grep { !/^\.\.?$/ } readdir( $dh );
-    closedir( $dh );
-    print "Info :: Disk \"$device_name\" slaves: " . join( ', ', @slaves ) . "\n" if $DEBUG;
-  } elsif ( $device_name =~ m|^(sd[a-z]+)$| ) {
-    warn "Warning :: Disk \"$device_name\" has no slaves.\n";
-    push @slaves, $1;
-  }
-
   if ( multipath_check( $wwid ) ) {
-    print "Info :: Device \"$wwid\" is a multipath device. Proceeding with multipath removal.\n";
+    print "Debug :: Device \"$wwid\" is a multipath device. Proceeding with multipath removal.\n" if $DEBUG;
 
     # remove the link
     exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
   } else {
-    print "Info :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n";
+    print "Debug :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n" if $DEBUG;
   }
 
-  # Iterate through slaves and delete each device
-  foreach my $slave_name ( @slaves ) {
-    print "Info :: Remove slave: $slave_name\n" if $DEBUG;
-    purestorage_unmap_disk( $slave_name );
-  }
+  # Iterate through slaves and remove each device
+  block_device_action( 'remove', @slaves );
 
-  print "Info :: Device \"$device_name\" is removed.\n";
+  print "Debug :: Device \"$wwid\" is removed.\n" if $DEBUG;
   return 1;
 }
 
