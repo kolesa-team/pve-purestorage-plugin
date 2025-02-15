@@ -172,7 +172,7 @@ sub scsi_scan_new {
     next unless $host =~ /^(\w+)$/;
     $path = '/sys/class/scsi_host/' . $1;    # untaint
     if ( -d $path ) {
-      device_op($path, 'scan', '- - -');
+      device_op( $path, 'scan', '- - -' );
       ++$count;
     } else {
       warn "Warning :: SCSI host path $path does not exist.\n";
@@ -323,7 +323,7 @@ sub purestorage_name {
 sub get_device_path_wwn {
   my ( $serial ) = @_;
 
-  die "Error :: Volume serial is missing" unless length( $serial );
+  die 'Error :: Volume serial is missing' unless length( $serial );
 
   # Construct the WWN path
   my $wwn  = lc( $purestorage_wwn_prefix . $serial );
@@ -332,27 +332,25 @@ sub get_device_path_wwn {
 }
 
 sub get_device_size {
-  my ( $path ) = @_;
-  print "Debug :: get_device_size($path)\n" if $DEBUG;
-  my $size = 0;
+  my ( $device ) = @_;
+  print "Debug :: get_device_size($device)\n" if $DEBUG;
 
-  exec_command(
-    [ 'blockdev', '--getsize64', $path ],
-    1,
-    outfunc => sub {
-      $size = $_[0];
-      chomp $size;
-    }
-  );
+  my $device_path = '/sys/block/' . basename( $device );
+  open( my $fh, '<', $device_path . '/size' ) or die "Error :: Cannot open file \"$device_path\": $!\n";
+  my $size = <$fh>;
+  close( $fh );
+  chomp( $size );
 
-  print "Debug :: Detected size: $size\n" if $DEBUG;
+  $size <<= 9;
+
+  print "Debug :: Device \"$device\" size is $size bytes\n" if $DEBUG;
   return $size;
 }
 
 sub device_op {
   my ( $device_path, $op, $value ) = @_;
 
-  open( my $fh, '>', $device_path . '/' . $op ) or die "Could not open file \"$device_path/$op\" for writing.\n";
+  open( my $fh, '>', $device_path . '/' . $op ) or die "Error :: Could not open file \"$device_path/$op\" for writing.\n";
   print $fh $value;
   close( $fh );
 }
