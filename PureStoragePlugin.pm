@@ -335,8 +335,8 @@ sub get_device_size {
   my ( $device ) = @_;
   print "Debug :: get_device_size($device)\n" if $DEBUG;
 
-  my $device_path = '/sys/block/' . basename( $device );
-  open( my $fh, '<', $device_path . '/size' ) or die "Error :: Cannot open file \"$device_path\": $!\n";
+  my $path = '/sys/block/' . basename( $device ) . '/size';
+  open( my $fh, '<', $path ) or die "Error :: Cannot open file \"$path\": $!\n";
   my $size = <$fh>;
   close( $fh );
   chomp( $size );
@@ -979,49 +979,32 @@ sub free_image {
 
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::list_images\n" if $DEBUG;
 
-  my $key = type() . ':' . $storeid;
-  if ( $cache->{ $key } ) {
-    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::list_images::cached\n" if $DEBUG;
-  } else {
-    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::list_images\n" if $DEBUG;
-    $cache->{ $key } = $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
-  }
-
-  return $cache->{ $key };
+  return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
 }
 
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
 
-  $cache = $cache->{ type() . ':' . $storeid } //= {};
-  $cache->{ last_update } //= 0;
+  my $response = purestorage_api_request( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
 
-  my $current_time = gettimeofday();
-  if ( $current_time - $cache->{ last_update } >= 60 ) {
-    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
+  # Get storage capacity and used space from the response
+  my $array = $response->{ items }->[0];
+  my $total = $array->{ capacity };
+  my $used  = $array->{ space }->{ total_physical };
 
-    my $response = purestorage_api_request( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
-
-    # Get storage capacity and used space from the response
-    $cache->{ total } = $response->{ items }->[0]->{ capacity };
-    $cache->{ used }  = $response->{ items }->[0]->{ space }->{ total_physical };
-
-    # $cache->{ used } = $response->{ items }->[0]->{ space }->{ total_used }; # Do not know what is correct
-
-    $cache->{ last_update } = $current_time;
-  } else {
-    print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status::cached\n" if $DEBUG;
-  }
+  # my $used = $array->{ space }->{ total_used }; # Do not know what is correct
 
   # Calculate free space
-  my $free = $cache->{ total } - $cache->{ used };
+  my $free = $total - $used;
 
   # Mark storage as active
   my $active = 1;
 
   # Return total, free, used space and the active status
-  return ( $cache->{ total }, $free, $cache->{ used }, $active );
+  return ( $total, $free, $used, $active );
 }
 
 sub activate_storage {
