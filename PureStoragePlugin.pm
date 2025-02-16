@@ -11,7 +11,7 @@ use File::Path ();
 
 use PVE::JSONSchema      ();
 use PVE::Network         ();
-use PVE::Tools           qw( run_command );
+use PVE::Tools           qw( file_read_firstline run_command );
 use PVE::INotify         ();
 use PVE::Storage::Plugin ();
 
@@ -336,12 +336,7 @@ sub get_device_size {
   print "Debug :: get_device_size($device)\n" if $DEBUG;
 
   my $path = '/sys/block/' . basename( $device ) . '/size';
-  open( my $fh, '<', $path ) or die "Error :: Cannot open file \"$path\": $!\n";
-  my $size = <$fh>;
-  close( $fh );
-  chomp( $size );
-
-  $size <<= 9;
+  my $size = file_read_firstline( $path ) << 9;
 
   print "Debug :: Device \"$device\" size is $size bytes\n" if $DEBUG;
   return $size;
