@@ -126,7 +126,6 @@ sub options {
 my $cmd = {
 
   #  fuser      => '/usr/bin/fuser',
-  multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
   blockdev   => '/usr/sbin/blockdev'
 };
@@ -187,11 +186,10 @@ sub scsi_scan_new {
 sub multipath_check {
   my ( $wwid ) = @_;
 
-  # TODO: Find a better check
-  # TODO: Support non-multipath mode
-  my $output = `$cmd->{ multipath } -l $wwid`;
-
-  return $output ne '';
+  my $output = `$cmd->{ "multipathd" } show map $wwid format %w`;
+  chomp($output);
+  
+  return $output eq $wwid;
 }
 
 sub wait_for {
