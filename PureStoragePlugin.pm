@@ -187,8 +187,8 @@ sub multipath_check {
   my ( $wwid ) = @_;
 
   my $output = `$cmd->{ "multipathd" } show map $wwid format %w`;
-  chomp($output);
-  
+  chomp( $output );
+
   return $output eq $wwid;
 }
 
