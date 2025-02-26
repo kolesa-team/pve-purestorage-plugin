@@ -186,7 +186,7 @@ sub scsi_scan_new {
 sub multipath_check {
   my ( $wwid ) = @_;
 
-  my $output = `$cmd->{ "multipathd" } show map $wwid format %w`;
+  my $output = `$cmd->{ multipathd } show map $wwid format %w`;
   chomp( $output );
 
   return $output eq $wwid;
