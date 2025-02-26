@@ -186,9 +186,16 @@ sub scsi_scan_new {
 sub multipath_check {
   my ( $wwid ) = @_;
 
-  my $output = `$cmd->{ multipathd } show map $wwid format %w`;
-  chomp( $output );
-
+  # TODO: Support non-multipath mode
+  my $output;
+  exec_command(
+    [ 'multipathd', 'show', 'map', $wwid, 'format', '%w' ],
+    -1,
+    outfunc => sub {
+      $output = $_[0];
+      chomp $output;
+    }
+  );
   return $output eq $wwid;
 }
 
