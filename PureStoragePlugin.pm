@@ -1085,7 +1085,7 @@ sub unmap_volume {
     exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
 
     # remove wwid from map file
-    exec_command( [ $cmd->{ sed }, '-i', "/$wwid/d", '/etc/multipath/wwids' ], 0 );
+    exec_command( [ 'sed', '-i', "/$wwid/d", '/etc/multipath/wwids' ], 0 );
   } else {
     print "Debug :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n" if $DEBUG;
   }
