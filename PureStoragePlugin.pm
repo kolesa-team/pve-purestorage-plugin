@@ -96,9 +96,17 @@ sub properties {
       default     => 'no'
     },
     protocol => {
-      description => "Set storage protocol ( iscsi | fc | nvme )",
+      description => "Set storage protocol ( iscsi | iscsidirect | fc | nvme )",
       type        => 'string',
       default     => $default_protocol
+    },
+    target_addr => {
+      description => "Set storage iSCSI Target Portal address (only for protocol iscsidirect)",
+      type        => 'string',
+    },
+    target_name => {
+      description => "Set storage iSCSI Target Name (only for protocol iscsidirect)",
+      type        => 'string',
     },
   };
 }
@@ -108,16 +116,18 @@ sub options {
     address => { fixed => 1 },
     token   => { fixed => 1 },
 
-    hgsuffix  => { optional => 1 },
-    vgname    => { optional => 1 },
-    podname   => { optional => 1 },
-    vnprefix  => { optional => 1 },
-    check_ssl => { optional => 1 },
-    protocol  => { optional => 1 },
-    nodes     => { optional => 1 },
-    disable   => { optional => 1 },
-    content   => { optional => 1 },
-    format    => { optional => 1 },
+    hgsuffix    => { optional => 1 },
+    vgname      => { optional => 1 },
+    podname     => { optional => 1 },
+    vnprefix    => { optional => 1 },
+    check_ssl   => { optional => 1 },
+    protocol    => { optional => 1 },
+    nodes       => { optional => 1 },
+    disable     => { optional => 1 },
+    content     => { optional => 1 },
+    format      => { optional => 1 },
+    target_addr => { optional => 1 },
+    target_name => { optional => 1 },
   };
 }
 
@@ -619,22 +629,28 @@ sub purestorage_get_wwn {
 sub purestorage_volume_connection {
   my ( $class, $scfg, $volname, $mode ) = @_;
 
-  my $method = $mode ? 'POST' : 'DELETE';
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_connection :: $method\n" if $DEBUG;
-
   my $hname    = PVE::INotify::nodename();
   my $hgsuffix = $scfg->{ hgsuffix } // $default_hgsuffix;
   $hname .= "-" . $hgsuffix if $hgsuffix ne "";
 
+  my $method;
   my $name;
-  my $ignore;
-  if ( $mode ) {
-    $name   = 'create volume connection';
-    $ignore = 'Connection already exists.';
+  my $ignore = '';
+  if ( !defined($mode) ) {
+    $name   = 'get volume connection';
+    $method = 'GET';
   } else {
-    $name   = 'delete volume connection';
-    $ignore = [ 'Volume has been destroyed.', 'Connection does not exist.' ];
+    if ( $mode ) {
+      $name   = 'create volume connection';
+      $method = 'POST';
+    } else {
+      $name   = 'delete volume connection';
+      $ignore = 'Volume has been destroyed.';
+      $method = 'DELETE';
+    }
   }
+
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_connection :: $method\n" if $DEBUG;
 
   my $action = {
     name   => $name,
@@ -649,8 +665,19 @@ sub purestorage_volume_connection {
 
   my $response = purestorage_api_request( $scfg, $action, 1 );
 
-  my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
-  print "Info :: Volume \"$volname\" is $message host \"$hname\".\n";
+  if (!defined($mode) || $mode) {
+    my $lun = 0;
+    $lun = $response->{ items }->[0]->{ lun } if $response->{ items }->[0] && $response->{ items }->[0]->{ volume }->{ name } eq purestorage_name( $scfg, $volname );
+    if ($lun) {
+      print "Info :: Volume \"$volname\" is " . ( defined($mode) ? 'now ' : '' ) . "connected as LUN $lun to Host \"$hname\"\n";
+      return $lun;
+    }
+    die ("Error :: Could not get LUN for Volume \"$volname\" on Host \"$hname\"\n") if ($mode);
+    print "Info :: Volume \"$volname\" is currently not connected to Host \"$hname\"\n";
+    return 0;
+  }
+  print "Info :: Volume \"$volname\" is " . ( $response->{ errors } ? 'already ' : '' ) . "disconnected from Host \"$hname\"\n";
+
   return 1;
 }
 
@@ -730,6 +757,14 @@ sub purestorage_resize_volume {
   my $response = purestorage_api_request( $scfg, $action );
 
   my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
+
+  my $protocol = $scfg->{ protocol } // $default_protocol;
+  if ( $protocol eq "iscsidirect" ) {
+      my $newsize = 0;
+      $newsize = $response->{ items }->[0]->{ provisioned } if $response->{ items }->[0]->{ source }->{ name } eq purestorage_name( $scfg, $volname );
+      die ("Error :: Could not get new size for Volume \"$volname\"\n") if (!$newsize);
+      return $newsize;
+  }
 
   my ( $path, $wwid ) = get_device_path_wwn( $serial );
 
@@ -886,6 +921,32 @@ sub parse_volname {
 
   die "Error :: Invalid volume name ($volname).\n";
   return 0;
+}
+
+sub path {
+  my ($class, $scfg, $volname, $storeid, $snapname) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub:path\n" if $DEBUG;
+
+  my $protocol = $scfg->{ protocol } // $default_protocol;
+  if ( $protocol eq "iscsidirect" ) {
+    die "Error :: path: snapshot is not implemented ($snapname)\n" if defined($snapname);
+
+    my $lun = $class->purestorage_volume_connection( $scfg, $volname );
+    if (!$lun) {
+      $lun = $class->purestorage_volume_connection( $scfg, $volname, 1 );
+    }
+    # do we even need this?
+    my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
+
+    my $target = $scfg->{target_name};
+    my $portal = $scfg->{target_addr};
+    my $path = "iscsi://$portal/$target/$lun";
+
+    print ("Debug :: path: $path\n") if $DEBUG;
+    return ($path, $vmid, $vtype);
+  }
+
+  return $class->filesystem_path($scfg, $volname, $snapname);
 }
 
 sub filesystem_path {
@@ -1099,19 +1160,29 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_volume\n" if $DEBUG;
 
-  $class->purestorage_volume_connection( $scfg, $volname, 1 );
-
-  $class->map_volume( $storeid, $scfg, $volname, $snapname );
-  return 1;
+  my $lun = $class->purestorage_volume_connection( $scfg, $volname );
+  if (!$lun) {
+    $class->purestorage_volume_connection( $scfg, $volname, 1 );
+  }
+  my $protocol = $scfg->{ protocol } // $default_protocol;
+  if ( $protocol ne "iscsidirect" ) {
+    $class->map_volume( $storeid, $scfg, $volname, $snapname );
+  }
 }
 
 sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::deactivate_volume\n" if $DEBUG;
 
-  $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
+  my $protocol = $scfg->{ protocol } // $default_protocol;
+  if ( $protocol ne "iscsidirect" ) {
+    $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
+  }
 
-  $class->purestorage_volume_connection( $scfg, $volname, 0 );
+  my $lun = $class->purestorage_volume_connection( $scfg, $volname );
+  if ($lun) {
+    $class->purestorage_volume_connection( $scfg, $volname, 0 );
+  }
 
   print "Info :: Volume \"$volname\" is deactivated.\n";
 
