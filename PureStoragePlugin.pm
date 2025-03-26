@@ -1053,24 +1053,21 @@ sub map_volume {
   };
 
   # Wait for the device to appear
-  if ( wait_for( $path_exists, "volume \"$volname\" to map" ) ) {
+  wait_for( $path_exists, "volume \"$volname\" to map", 30 );
 
-    # we might end up with operational disk but without multipathing, e.g.
-    # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
-    if ( !multipath_check( $wwid ) ) {
-      print "Debug :: Adding multipath map for device \"$wwid\"\n" if $DEBUG;
-      exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
+  # we might end up with operational disk but without multipathing, e.g.
+  # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
+  if ( !multipath_check( $wwid ) ) {
+    print "Debug :: Adding multipath map for device \"$wwid\"\n" if $DEBUG;
+    exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
 
-      # Wait for multipath to be fully established
-      my $multipath_ready = sub {
-        return multipath_check( $wwid );
-      };
-      wait_for( $multipath_ready, "multipath map for volume \"$volname\" to be ready", 30, 0.5 );
-    }
-    return $path;
+    # Wait for multipath to be fully established
+    my $multipath_ready = sub {
+      return multipath_check( $wwid );
+    };
+    wait_for( $multipath_ready, "multipath map for volume \"$volname\" to be ready", 30 );
   }
-
-  die "Error :: Local path \"$path\" does not exist.\n";
+  return $path;
 }
 
 sub unmap_volume {
