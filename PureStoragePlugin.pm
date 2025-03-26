@@ -892,6 +892,8 @@ sub filesystem_path {
   my ( $class, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::filesystem_path\n" if $DEBUG;
 
+  die "Error :: filesystem_path: snapshot is not implemented ($snapname)\n" if defined($snapname);
+
   # do we even need this?
   my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
 
