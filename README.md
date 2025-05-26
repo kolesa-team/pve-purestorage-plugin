@@ -62,6 +62,17 @@ blacklist_exceptions {
   }
 }
 ```
+## iSCSI Configuration
+
+Initiate iSCSI according to the Proxmox Guidelines.
+
+```bash
+sudo iscsiadm -m discovery -t sendtargets -p <PURE ISCSI ADAPTER IP>
+sudo iscsiadm -m node --op update -n node.startup -v automatic
+```
+
+> [!CAUTION]
+> As long as there are no hostX entries in /sys/class/iscsi_host/ the plugin is not ready to be used.
 
 ## Installation
 
@@ -95,6 +106,8 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 ```
 
 ## Configuration
+> [!TIP]
+> If your are using a cluster setup - this step needs to be executed only on one note of the cluster - corosync will do the rest for you.
 
 After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to open shell and use `pvesm` command to add it:
 
