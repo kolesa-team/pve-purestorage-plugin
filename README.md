@@ -4,6 +4,7 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 
 ## Table of Contents
 
+- [Features](#features)
 - [Prerequisites](#prerequisites)
   - [Multipath Configuration](#multipath-configuration)
 - [Installation](#installation)
@@ -12,6 +13,14 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [Contributing](#contributing)
+
+## Features
+- Easily enable and configure multipathing iSCSI to the Pure Array
+- Storage based snapshots
+  - Snapshots are presented in Proxmox like any other native Snapshot to a VM
+  - Snapshots are created by the Pure Array, making them deduped and instant
+- Instant storage migration
+  - The plugin will automatically map the iSCSI volumes needed on the host the VM is being migrated to
 
 ## Prerequisites
 
