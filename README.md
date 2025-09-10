@@ -95,13 +95,13 @@ To manually install the plugin, follow these steps:
 # Clone repository
 git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
 # Navigate to the Plugin Directory
-cd pve-purestorage
+cd pve-purestorage-plugin
 # Create the custom plugin directory if it does not already exist
 mkdir /usr/share/perl5/PVE/Storage/Custom
 # Copy plugin to custom plugin directory
-sudo cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
+cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
 # Restart Proxmox VE
-sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
+systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 ```
 
 ### APT
