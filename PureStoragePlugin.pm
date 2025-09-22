@@ -67,8 +67,8 @@ sub api {
      return $tested_apiver;
   }
 
-  # fallback that worked a very very long time ago, nowadays useless, as the core does APIVER - APIAGE checking
-  return 3;
+  # lowest apiver we support
+  return 10;
 }
 
 sub type {
