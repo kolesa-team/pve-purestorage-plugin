@@ -26,7 +26,7 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 
 Before installing and using this plugin, ensure that your Proxmox VE environment meets the following prerequisites.
 
-### Multipath Configuration
+### Multipath Configuration (not required for protocol iscsidirect)
 
 To ensure correct operation with Pure Storage, you need to configure your multipath settings appropriately. Specifically, you need to set find_multipaths to no in your multipath.conf file. This setting disables the automatic detection of multipath devices, which is necessary for Pure Storage devices to be correctly recognized.
 
@@ -153,7 +153,9 @@ purestorage: <storage_id>
 | vnprefix | (`optional`) The prefix to prepend to name of virtual disks. |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
-| protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, fc) |
+| protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, iscsidirect, fc) |
+| target_addr | (`optional`, only for protocol `iscsidirect`) Set storage iSCSI Target Portal address |
+| target_name | (`optional`, only for protocol `iscsidirect`) Set storage iSCSI Target Name |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
 
