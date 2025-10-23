@@ -143,7 +143,8 @@ my $cmd = {
   #  fuser      => '/usr/bin/fuser',
   multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
-  blockdev   => '/usr/sbin/blockdev'
+  blockdev   => '/usr/sbin/blockdev',
+  sed        => '/usr/bin/sed'
 };
 
 sub exec_command {
@@ -1099,6 +1100,9 @@ sub unmap_volume {
 
     # remove the link
     exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
+
+    # remove wwid from map file
+    exec_command( [ 'sed', '-i', "/$wwid/d", '/etc/multipath/wwids' ], 0 );
   } else {
     print "Debug :: Device \"$wwid\" is not a multipath device. Skipping multipath removal.\n" if $DEBUG;
   }
