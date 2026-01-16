@@ -132,6 +132,11 @@ sub properties {
       type        => 'string',
       default     => $default_protocol
     },
+    token_ttl => {
+      description => "Session token time-to-live in seconds.",
+      type        => 'integer',
+      default     => 3600
+    },
   };
 }
 
@@ -146,6 +151,7 @@ sub options {
     vnprefix  => { optional => 1 },
     check_ssl => { optional => 1 },
     protocol  => { optional => 1 },
+    token_ttl => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
