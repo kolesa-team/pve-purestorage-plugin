@@ -23,8 +23,26 @@ use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
+use JSON;
+use File::Path qw(make_path);
 
 use base qw(PVE::Storage::Plugin);
+
+# Error code constants
+use constant {
+  ERROR_TOKEN_UPDATED => -1,
+  ERROR_SUCCESS       => 0,
+  ERROR_API_ERROR     => 1,
+  ERROR_NETWORK_ERROR => 2,
+  ERROR_AUTH_FAILED   => 3,
+};
+
+# Token state constants
+use constant {
+  TOKEN_STATE_LOGIN  => 0,
+  TOKEN_STATE_NEEDED => 1,
+  TOKEN_STATE_CACHED => 2,
+};
 
 push @PVE::Storage::Plugin::SHARED_STORAGE, 'purestorage';
 $Data::Dumper::Terse  = 1;    # Removes `$VAR1 =` in output
@@ -502,7 +520,7 @@ sub cleanup_partitions_on_device {
 
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
-sub purestorage_api_request {
+sub purestorage_api_call {
   my ( $scfg, $action, $all ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_request\n" if $DEBUG;
 
@@ -548,7 +566,7 @@ sub purestorage_api_request {
       request_id => $scfg->{ '_request_id' . $i }
     };
 
-    ( $error, $content ) = purestorage_api_request1( $config, $path, $method, $login, $body );
+    ( $error, $content ) = purestorage_http_request( $config, $path, $method, $login, $body );
     if ( $error == -1 ) {
       $scfg->{ '_auth_token' . $i } = $config->{ auth_token };
       $scfg->{ '_request_id' . $i } = $config->{ request_id };
@@ -574,7 +592,7 @@ sub purestorage_api_request {
   return $content;
 }
 
-sub purestorage_api_request1 {
+sub purestorage_http_request {
   my ( $config, $path, $method, $login, $body ) = @_;
 
   my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
@@ -596,7 +614,7 @@ sub purestorage_api_request1 {
     if ( $token_state > 0 ) {
       if ( $token_state == 1 ) {
         print "Debug :: Requesting new session token\n" if $DEBUG;
-        ( $error, $content ) = purestorage_api_request1( $config, 'login', 'POST', 1 );
+        ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
         return ( $error, $content ) if $error > 0;
       } else {
         print "Debug :: Using existing session token\n" if $DEBUG;
@@ -661,7 +679,7 @@ sub purestorage_get_volumes {
     params => { filter => $filter }
   };
 
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action );
 
   my $pref_len = length( purestorage_name_prefix( $scfg ) );
   my @volumes  = map {
@@ -745,7 +763,7 @@ sub purestorage_volume_connection {
     }
   };
 
-  my $response = purestorage_api_request( $scfg, $action, 1 );
+  my $response = purestorage_api_call( $scfg, $action, 1 );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
   print "Info :: Volume \"$volname\" is $message host \"$hname\".\n";
@@ -764,7 +782,7 @@ sub purestorage_create_volume {
     body   => { provisioned => $size }
   };
 
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action );
 
   my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
   print "Info :: Volume \"$volname\" is created (serial=$serial).\n";
@@ -782,7 +800,7 @@ sub purestorage_remove_volume {
     $eradicate //= 0;
   }
 
-  # Очистка локальных device mappings перед удалением на Pure Storage
+  # Clean up local device mappings before removing on Pure Storage
   my $volume = $class->purestorage_get_volume_info( $scfg, $volname, $storeid, 0 );
   if ( $volume && $volume->{ serial } ) {
     my ( $path, $wwid ) = get_device_path_wwn( $volume->{ serial } );
@@ -790,13 +808,13 @@ sub purestorage_remove_volume {
     if ( $wwid ne '' && -e "/dev/mapper/$wwid" ) {
       print "Debug :: Cleaning up local device mappings for $wwid\n" if $DEBUG;
 
-      # 1. Удалить LVM mappings поверх устройства
+      # 1. Remove LVM mappings on the device
       cleanup_lvm_on_device( $wwid );
 
-      # 2. Удалить partition mappings
+      # 2. Remove partition mappings
       cleanup_partitions_on_device( $wwid );
 
-      # 3. Удалить multipath device
+      # 3. Remove multipath device
       if ( multipath_check( $wwid ) ) {
         print "Debug :: Removing multipath device $wwid\n" if $DEBUG;
         exec_command( [ 'multipath', '-f', $wwid ], 0 );
@@ -814,7 +832,7 @@ sub purestorage_remove_volume {
     body   => { destroyed => \1 }
   };
 
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   print "Info :: Volume \"$volname\" is $message.\n";
@@ -827,7 +845,7 @@ sub purestorage_remove_volume {
       params => $params,
     };
 
-    purestorage_api_request( $scfg, $action );
+    purestorage_api_call( $scfg, $action );
 
     print "Info :: Volume \"$volname\" is eradicated.\n";
   }
@@ -847,7 +865,7 @@ sub purestorage_resize_volume {
     body   => { provisioned => $size }
   };
 
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action );
 
   my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
 
@@ -896,7 +914,7 @@ sub purestorage_rename_volume {
     body   => { name  => purestorage_name( $scfg, $target_volname ) }
   };
 
-  purestorage_api_request( $scfg, $action );
+  purestorage_api_call( $scfg, $action );
 
   print "Info :: Volume \"$source_volname\" is renamed to \"$target_volname\".\n";
 
@@ -917,7 +935,7 @@ sub purestorage_snap_volume_create {
     }
   };
 
-  purestorage_api_request( $scfg, $action );
+  purestorage_api_call( $scfg, $action );
 
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is created.\n";
   return 1;
@@ -942,7 +960,7 @@ sub purestorage_volume_restore {
     }
   };
 
-  purestorage_api_request( $scfg, $action );
+  purestorage_api_call( $scfg, $action );
 
   my $source = length( $snap ) ? 'snapshot "' . $snap . '"' : '';
   if ( $volname ne $svolname ) {
@@ -968,7 +986,7 @@ sub purestorage_snap_volume_delete {
     params => $params,
     body   => { destroyed => \1 }
   };
-  my $response = purestorage_api_request( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is $message.\n";
@@ -982,7 +1000,7 @@ sub purestorage_snap_volume_delete {
     params => $params,
     body   => { replication_snapshot => \1 }
   };
-  $response = purestorage_api_request( $scfg, $action );
+  $response = purestorage_api_call( $scfg, $action );
 
   $message = ( $response->{ errors } ? 'already ' : '' ) . 'eradicated';
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is $message.\n";
@@ -1105,7 +1123,7 @@ sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
 
-  my $response = purestorage_api_request( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
+  my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
 
   # Get storage capacity and used space from the response
   my $array = $response->{ items }->[0];
