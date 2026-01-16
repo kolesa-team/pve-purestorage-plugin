@@ -15,6 +15,7 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 - [Contributing](#contributing)
 
 ## Features
+
 - Easily enable and configure multipathing iSCSI to the Pure Array
 - Storage based snapshots
   - Snapshots are presented in Proxmox like any other native Snapshot to a VM
@@ -32,7 +33,7 @@ To ensure correct operation with Pure Storage, you need to configure your multip
 
 Below is an example of how your multipath.conf file should look when configured for Pure Storage arrays:
 
-```
+```text
 defaults {
   polling_interval 2
   find_multipaths no
@@ -71,6 +72,7 @@ blacklist_exceptions {
   }
 }
 ```
+
 ## iSCSI Configuration
 
 Initiate iSCSI according to the Proxmox Guidelines.
@@ -115,6 +117,7 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 ```
 
 ## Configuration
+
 > [!TIP]
 > If your are using a cluster setup - this step needs to be executed only on one note of the cluster - corosync will do the rest for you.
 
@@ -132,7 +135,7 @@ pvesm add purestorage <storage_id> \
 
 Alternatively, you can manually edit the storage configuration file `/etc/pve/storage.cfg`.
 
-```
+```text
 purestorage: <storage_id>
   nodes <proxmox_node_list>
   address https://<purestorage_fqdn_or_ip>
@@ -159,7 +162,7 @@ purestorage: <storage_id>
 
 Example Configuration:
 
-```
+```text
 purestorage: pure
   address https://purestorage.example.com
   token abc123
@@ -180,11 +183,13 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 - Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach the Pure Storage array over the network. Check for firewall rules or network issues that might be blocking communication.
 - Review Logs: Check the Proxmox VE logs for any error messages related to storage or the plugin. Logs are typically found in /var/log/pve.
   These commands are helpful for troubleshooting:
+
   ```bash
   multipath -ll -v3 #diagnose issues with the multipath service
   iscsiadm -m node #list what iscsi nodes are mounted
   ls -l /dev/mapper/3624a9370* #list wwids of Pure mapped devices on the system
   ```
+
 - Multipath Configuration: Verify that your multipath.conf is correctly configured and that multipath devices are recognized. Use multipath -ll to list the current multipath devices.
 - API Token Permissions: Ensure that the API token used has the necessary permissions to create and manage volumes on the Pure Storage array.
 - Plugin Updates: Ensure you are using the latest version of the plugin. Check the GitHub repository for updates.

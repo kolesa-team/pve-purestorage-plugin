@@ -66,7 +66,6 @@ sub api {
   if ($apiver - $apiage < $tested_apiver) {
      return $tested_apiver;
   }
-
   # lowest apiver we support
   return 10;
 }
@@ -417,6 +416,90 @@ sub block_device_slaves {
   return $device_path, @slaves;
 }
 
+sub cleanup_lvm_on_device {
+  my ( $wwid ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::cleanup_lvm_on_device\n" if $DEBUG;
+
+  my $cleaned = 0;
+
+  my @dm_devices;
+  eval {
+    run_command( [ 'dmsetup', 'ls' ], outfunc => sub {
+      my $line = shift;
+      if ( $line =~ /^(\S+)\s+\(/ ) {
+        push @dm_devices, $1;
+      }
+    });
+  };
+  return 0 if $@;
+
+  my @lvm_to_remove;
+  foreach my $dm ( @dm_devices ) {
+    next if $dm =~ /^${wwid}(-part\d+)?$/;
+
+    my $deps = '';
+    eval {
+      run_command( [ 'dmsetup', 'deps', '-o', 'devname', $dm ],
+        outfunc => sub { $deps .= shift; },
+        errfunc => sub { } );
+    };
+
+    if ( $deps =~ /${wwid}/ ) {
+      push @lvm_to_remove, $dm;
+    }
+  }
+
+  foreach my $lvm ( reverse sort @lvm_to_remove ) {
+    print "Debug :: Removing LVM device: $lvm\n" if $DEBUG;
+    my $removed = 0;
+
+    eval {
+      run_command( [ 'dmsetup', 'remove', $lvm ], errfunc => sub { } );
+      $removed = 1;
+    };
+
+    if ( !$removed ) {
+      eval {
+        run_command( [ 'dmsetup', 'remove', '--force', $lvm ], errfunc => sub { } );
+        $removed = 1;
+      };
+    }
+
+    $cleaned++ if $removed;
+    warn "Warning :: Failed to remove LVM device $lvm\n" unless $removed;
+  }
+
+  return $cleaned;
+}
+
+sub cleanup_partitions_on_device {
+  my ( $wwid ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::cleanup_partitions_on_device\n" if $DEBUG;
+
+  my $cleaned = 0;
+  my $dm_path = '/dev/mapper/' . $wwid;
+
+  eval {
+    run_command( [ 'kpartx', '-d', $dm_path ], errfunc => sub { } );
+    $cleaned++;
+  };
+
+  opendir( my $dh, '/dev/mapper' ) or return $cleaned;
+  my @partitions = grep { /^${wwid}-part\d+$/ } readdir( $dh );
+  closedir( $dh );
+
+  foreach my $part ( reverse sort @partitions ) {
+    print "Debug :: Removing partition: $part\n" if $DEBUG;
+    eval {
+      run_command( [ 'dmsetup', 'remove', '--force', $part ], errfunc => sub { } );
+      $cleaned++;
+    };
+    warn "Warning :: Failed to remove partition $part\n" if $@;
+  }
+
+  return $cleaned;
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_api_request {
@@ -697,6 +780,28 @@ sub purestorage_remove_volume {
     $eradicate = 1;
   } else {
     $eradicate //= 0;
+  }
+
+  # Очистка локальных device mappings перед удалением на Pure Storage
+  my $volume = $class->purestorage_get_volume_info( $scfg, $volname, $storeid, 0 );
+  if ( $volume && $volume->{ serial } ) {
+    my ( $path, $wwid ) = get_device_path_wwn( $volume->{ serial } );
+
+    if ( $wwid ne '' && -e "/dev/mapper/$wwid" ) {
+      print "Debug :: Cleaning up local device mappings for $wwid\n" if $DEBUG;
+
+      # 1. Удалить LVM mappings поверх устройства
+      cleanup_lvm_on_device( $wwid );
+
+      # 2. Удалить partition mappings
+      cleanup_partitions_on_device( $wwid );
+
+      # 3. Удалить multipath device
+      if ( multipath_check( $wwid ) ) {
+        print "Debug :: Removing multipath device $wwid\n" if $DEBUG;
+        exec_command( [ 'multipath', '-f', $wwid ], 0 );
+      }
+    }
   }
 
   my $params = { names => purestorage_name( $scfg, $volname ) };
@@ -1068,12 +1173,20 @@ sub map_volume {
   };
 
   # Wait for the device to appear
-  wait_for( $path_exists, "volume \"$volname\" to map" );
+  wait_for( $path_exists, "volume \"$volname\" to map", 30 );
 
   # we might end up with operational disk but without multipathing, e.g.
   # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
-  exec_command( [ 'multipathd', 'add', 'map', $wwid ] ) unless multipath_check( $wwid );
+  if ( !multipath_check( $wwid ) ) {
+    print "Debug :: Adding multipath map for device \"$wwid\"\n" if $DEBUG;
+    exec_command( [ 'multipathd', 'add', 'map', $wwid ] );
 
+    # Wait for multipath to be fully established
+    my $multipath_ready = sub {
+      return multipath_check( $wwid );
+    };
+    wait_for( $multipath_ready, "multipath map for volume \"$volname\" to be ready", 30 );
+  }
   return $path;
 }
 
