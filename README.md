@@ -157,6 +157,7 @@ purestorage: <storage_id>
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
 | protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, fc) |
+| token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
 
