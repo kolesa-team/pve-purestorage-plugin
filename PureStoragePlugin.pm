@@ -23,41 +23,40 @@ use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
-use JSON;
-use File::Path qw(make_path);
 
 use base qw(PVE::Storage::Plugin);
-
-# Error code constants
-use constant {
-  ERROR_TOKEN_UPDATED => -1,
-  ERROR_SUCCESS       => 0,
-  ERROR_API_ERROR     => 1,
-  ERROR_NETWORK_ERROR => 2,
-  ERROR_AUTH_FAILED   => 3,
-};
-
-# Token state constants
-use constant {
-  TOKEN_STATE_LOGIN  => 0,
-  TOKEN_STATE_NEEDED => 1,
-  TOKEN_STATE_CACHED => 2,
-};
 
 push @PVE::Storage::Plugin::SHARED_STORAGE, 'purestorage';
 $Data::Dumper::Terse  = 1;    # Removes `$VAR1 =` in output
 $Data::Dumper::Indent = 1;    # Outputs everything in one line
 $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 
+# Error code constants for API requests
+use constant {
+  ERROR_TOKEN_UPDATED => -1,    # Token was refreshed (success, but need to update cache)
+  ERROR_SUCCESS       => 0,     # Request succeeded
+  ERROR_API_ERROR     => 1,     # PureStorage API returned an error
+  ERROR_NETWORK_ERROR => 2,     # Network or connectivity error
+  ERROR_AUTH_FAILED   => 3,     # Authentication failed
+};
+
+# Token state constants for authentication state machine
+use constant {
+  TOKEN_STATE_LOGIN  => 0,    # Performing login request (using api-token)
+  TOKEN_STATE_NEEDED => 1,    # Need to obtain session token
+  TOKEN_STATE_CACHED => 2,    # Have valid cached session token
+};
+
 my $PSFA_API               = '2.26';
 my $purestorage_wwn_prefix = '3624a9370';
 my $default_hgsuffix       = "";
 my $default_protocol       = 'iscsi';
 
-my $DEBUG = 0;
+my $DEBUG = 1;
 
 ### BLOCK: Configuration
 sub api {
+
   # PVE 5:   APIVER  2
   # PVE 6:   APIVER  3
   # PVE 6:   APIVER  4 e6f4eed43581de9b9706cc2263c9631ea2abfc1a / volume_has_feature
@@ -135,7 +134,7 @@ sub properties {
     token_ttl => {
       description => "Session token time-to-live in seconds.",
       type        => 'integer',
-      default     => 3600
+      default     => 3600  # Max 10h
     },
   };
 }
@@ -166,16 +165,76 @@ my $cmd = {
   #  fuser      => '/usr/bin/fuser',
   multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
-  blockdev   => '/usr/sbin/blockdev'
+  blockdev   => '/usr/sbin/blockdev',
+  dmsetup    => '/sbin/dmsetup',
+  kpartx     => '/sbin/kpartx'
 };
+
+# Get full path for a command, checking availability
+sub get_command_path {
+  my ( $name ) = @_;
+
+  # Check all commands on first use
+  ensure_commands_checked();
+
+  my $path = $cmd->{ $name };
+  if ( !defined $path ) {
+    die "Error :: Unknown command '$name'\n";
+  }
+
+  if ( !-x $path ) {
+    die "Error :: Command '$name' not found or not executable at '$path'\n";
+  }
+
+  return $path;
+}
+
+# Check if required commands are available on the system
+sub check_commands {
+  my @missing;
+
+  foreach my $name ( keys %$cmd ) {
+    my $path = $cmd->{ $name };
+    if ( !-x $path ) {
+      push @missing, "$name ($path)";
+    }
+  }
+
+  if ( @missing ) {
+    warn "Warning :: The following commands are not available or not executable:\n";
+    warn "  - $_\n" foreach @missing;
+    warn "Plugin functionality may be limited.\n";
+  }
+
+  return scalar @missing == 0;
+}
+
+# Check commands availability - called lazily on first use
+my $commands_checked = 0;
+
+sub ensure_commands_checked {
+  return if $commands_checked;
+  check_commands();
+  $commands_checked = 1;
+}
 
 sub exec_command {
   my ( $command, $dm, %param ) = @_;
 
   $dm //= 1;
 
-  my $fc = $cmd->{ $command->[0] };
-  $command->[0] = $fc if defined $fc;
+  # Try to resolve command path if it's a known command name
+  my $cmd_name = $command->[0];
+  if ( exists $cmd->{ $cmd_name } ) {
+    eval {
+      $command->[0] = get_command_path( $cmd_name );
+    };
+    if ( $@ ) {
+      # Command not available, but continue with original name
+      # This allows system PATH resolution as fallback
+      warn "Warning :: $@" if $dm >= 0;
+    }
+  }
 
   print "Debug :: execute '" . join( ' ', @$command ) . "'\n" if $DEBUG >= 2;
 
@@ -227,7 +286,8 @@ sub multipath_check {
 
   # TODO: Find a better check
   # TODO: Support non-multipath mode
-  my $output = `$cmd->{ multipath } -l $wwid`;
+  my $multipath_cmd = get_command_path( 'multipath' );
+  my $output = `$multipath_cmd -l $wwid 2>/dev/null`;
 
   return $output ne '';
 }
@@ -448,7 +508,7 @@ sub cleanup_lvm_on_device {
 
   my @dm_devices;
   eval {
-    run_command( [ 'dmsetup', 'ls' ], outfunc => sub {
+    run_command( [ get_command_path( 'dmsetup' ), 'ls' ], outfunc => sub {
       my $line = shift;
       if ( $line =~ /^(\S+)\s+\(/ ) {
         push @dm_devices, $1;
@@ -463,7 +523,7 @@ sub cleanup_lvm_on_device {
 
     my $deps = '';
     eval {
-      run_command( [ 'dmsetup', 'deps', '-o', 'devname', $dm ],
+      run_command( [ get_command_path( 'dmsetup' ), 'deps', '-o', 'devname', $dm ],
         outfunc => sub { $deps .= shift; },
         errfunc => sub { } );
     };
@@ -478,13 +538,13 @@ sub cleanup_lvm_on_device {
     my $removed = 0;
 
     eval {
-      run_command( [ 'dmsetup', 'remove', $lvm ], errfunc => sub { } );
+      run_command( [ get_command_path( 'dmsetup' ), 'remove', $lvm ], errfunc => sub { } );
       $removed = 1;
     };
 
     if ( !$removed ) {
       eval {
-        run_command( [ 'dmsetup', 'remove', '--force', $lvm ], errfunc => sub { } );
+        run_command( [ get_command_path( 'dmsetup' ), 'remove', '--force', $lvm ], errfunc => sub { } );
         $removed = 1;
       };
     }
@@ -504,7 +564,7 @@ sub cleanup_partitions_on_device {
   my $dm_path = '/dev/mapper/' . $wwid;
 
   eval {
-    run_command( [ 'kpartx', '-d', $dm_path ], errfunc => sub { } );
+    run_command( [ get_command_path( 'kpartx' ), '-d', $dm_path ], errfunc => sub { } );
     $cleaned++;
   };
 
@@ -515,7 +575,7 @@ sub cleanup_partitions_on_device {
   foreach my $part ( reverse sort @partitions ) {
     print "Debug :: Removing partition: $part\n" if $DEBUG;
     eval {
-      run_command( [ 'dmsetup', 'remove', '--force', $part ], errfunc => sub { } );
+      run_command( [ get_command_path( 'dmsetup' ), 'remove', '--force', $part ], errfunc => sub { } );
       $cleaned++;
     };
     warn "Warning :: Failed to remove partition $part\n" if $@;
@@ -524,11 +584,211 @@ sub cleanup_partitions_on_device {
   return $cleaned;
 }
 
+### BLOCK: Token cache management => PVE::Storage::Custom::PureStoragePlugin::sub::token_cache
+
+sub get_token_cache_path {
+  my ( $storeid, $array_index ) = @_;
+
+  my $cache_dir = '/etc/pve/priv/purestorage';
+
+  # Create cache directory if it doesn't exist
+  if ( !-d $cache_dir ) {
+    eval {
+      File::Path::make_path( $cache_dir, { mode => 0700 } );
+      print "Debug :: Created token cache directory: $cache_dir\n" if $DEBUG;
+    };
+    if ( $@ ) {
+      warn "Warning :: Failed to create token cache directory $cache_dir: $@\n";
+      return undef;
+    }
+  }
+
+  return "$cache_dir/${storeid}_array${array_index}.json";
+}
+
+sub read_token_cache {
+  my ( $cache_path ) = @_;
+
+  return undef unless defined $cache_path;
+  return undef unless -f $cache_path;
+
+  eval {
+    my $json_text = PVE::Tools::file_get_contents( $cache_path );
+    my $token_data = decode_json( $json_text );
+    print "Debug :: Read token cache from: $cache_path\n" if $DEBUG;
+    return $token_data;
+  };
+  if ( $@ ) {
+    warn "Warning :: Failed to read token cache from $cache_path: $@\n";
+    # Delete corrupt cache file
+    eval { unlink $cache_path };
+    return undef;
+  }
+}
+
+sub write_token_cache {
+  my ( $cache_path, $token_data ) = @_;
+
+  return unless defined $cache_path;
+
+  my $json_text = encode_json( $token_data );
+
+  # Atomic write: write to temp file, then rename
+  my $temp_path = "$cache_path.tmp.$$";
+
+  eval {
+    my $fh = IO::File->new( $temp_path, 'w', 0600 )
+      or die "Cannot create temp file $temp_path: $!\n";
+    print $fh $json_text;
+    $fh->close();
+
+    rename( $temp_path, $cache_path )
+      or die "Cannot rename $temp_path to $cache_path: $!\n";
+
+    print "Debug :: Wrote token cache to: $cache_path\n" if $DEBUG;
+  };
+  if ( $@ ) {
+    warn "Warning :: Failed to write token cache to $cache_path: $@\n";
+    # Clean up temp file if it exists
+    eval { unlink $temp_path if -f $temp_path };
+    die $@;
+  }
+}
+
+sub is_token_valid {
+  my ( $token_data, $ttl ) = @_;
+
+  return 0 unless defined $token_data;
+  return 0 unless defined $token_data->{ auth_token };
+  return 0 unless defined $token_data->{ created_at };
+  return 0 unless defined $token_data->{ ttl };
+
+  my $now = time();
+  my $age = $now - $token_data->{ created_at };
+  my $refresh_threshold = $ttl * 0.8;
+
+  if ( $age < $refresh_threshold ) {
+    print "Debug :: Token is valid (age: ${age}s, threshold: ${refresh_threshold}s)\n" if $DEBUG;
+    return 1;
+  }
+
+  print "Debug :: Token needs refresh (age: ${age}s >= threshold: ${refresh_threshold}s)\n" if $DEBUG;
+  return 0;
+}
+
+sub cleanup_expired_cache {
+  my ( $cache_path, $ttl ) = @_;
+
+  return unless defined $cache_path;
+  return unless -f $cache_path;
+
+  my $token_data = read_token_cache( $cache_path );
+  return unless defined $token_data;
+
+  if ( defined $token_data->{ expires_at } ) {
+    my $now = time();
+    if ( $now >= $token_data->{ expires_at } ) {
+      print "Debug :: Cleaning up expired token cache: $cache_path\n" if $DEBUG;
+      eval { unlink $cache_path };
+      if ( $@ ) {
+        warn "Warning :: Failed to delete expired cache $cache_path: $@\n";
+      }
+    }
+  }
+}
+
+### BLOCK: API Helper functions => PVE::Storage::Custom::PureStoragePlugin::sub::api_helpers
+
+sub load_auth_token {
+  my ( $storeid, $array_index, $scfg ) = @_;
+
+  my $cache_path = defined( $storeid ) ? get_token_cache_path( $storeid, $array_index ) : undef;
+  my $ttl = $scfg->{ token_ttl } || 3600;
+
+  # Try file cache first
+  if ( $cache_path ) {
+    my $cached_token = read_token_cache( $cache_path );
+    if ( $cached_token && is_token_valid( $cached_token, $ttl ) ) {
+      my $age = time() - $cached_token->{ created_at };
+      print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG;
+      return (
+        $cached_token->{ auth_token },
+        $cached_token->{ request_id },
+        $cache_path,
+        $ttl
+      );
+    }
+  }
+
+  # Fallback to in-memory cache
+  my $auth_token = $scfg->{ '_auth_token' . $array_index };
+  my $request_id = $scfg->{ '_request_id' . $array_index };
+
+  return ( $auth_token, $request_id, $cache_path, $ttl );
+}
+
+sub save_token_to_cache {
+  my ( $config, $token_state ) = @_;
+
+  # Only save if this was a login request
+  return unless $token_state == TOKEN_STATE_LOGIN;
+
+  # Only save if we have cache path and token
+  return unless $config->{ cache_path } && $config->{ auth_token };
+
+  my $now = time();
+  my $ttl = $config->{ ttl } || 3600;
+
+  my $token_data = {
+    auth_token => $config->{ auth_token },
+    request_id => $config->{ request_id },
+    created_at => $now,
+    ttl        => $ttl,
+    expires_at => $now + $ttl
+  };
+
+  eval {
+    write_token_cache( $config->{ cache_path }, $token_data );
+    print "Debug :: Token cached to file: $config->{ cache_path }\n" if $DEBUG;
+  };
+
+  if ( $@ ) {
+    warn "Warning :: Failed to write token cache: $@\n";
+  }
+}
+
+sub cleanup_token_cache {
+  my ( $config ) = @_;
+
+  return unless $config->{ cache_path };
+
+  eval {
+    cleanup_expired_cache(
+      $config->{ cache_path },
+      $config->{ ttl } || 3600
+    );
+  };
+}
+
+sub is_ignorable_error {
+  my ( $action, $content ) = @_;
+
+  my $ignore = $action->{ ignore };
+  return 0 unless defined $ignore;
+
+  # Normalize to array
+  $ignore = [$ignore] unless ref( $ignore ) eq 'ARRAY';
+
+  # Check if error message is in ignore list
+  my $error_msg = $content->{ errors }->[0]->{ message } // '';
+  return grep { $_ eq $error_msg } @$ignore;
+}
+
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_api_call {
-  my ( $scfg, $action, $all ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_request\n" if $DEBUG;
+  my ( $scfg, $action, $all, $storeid ) = @_;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_call\n" if $DEBUG;
 
   $all //= 0;
 
@@ -564,34 +824,40 @@ sub purestorage_api_call {
     my $cf = $url eq '' ? 'address' : $token eq '' ? 'token' : '';
     die "Error :: Pure Storage \"$cf\" parameter" . ( $i == 0 ? '' : ' for second array' ) . " is not defined.\n" unless $cf eq '';
 
+    # Load auth token (file cache → memory cache → undef)
+    my ( $auth_token, $request_id, $cache_path, $ttl ) = load_auth_token( $storeid, $i, $scfg );
+
     my $config = {
       ua         => $ua,
       url        => $url,
       token      => $token,
-      auth_token => $scfg->{ '_auth_token' . $i },
-      request_id => $scfg->{ '_request_id' . $i }
+      auth_token => $auth_token,
+      request_id => $request_id,
+      cache_path => $cache_path,
+      ttl        => $ttl
     };
 
     ( $error, $content ) = purestorage_http_request( $config, $path, $method, $login, $body );
-    if ( $error == -1 ) {
+
+    # Handle token update
+    if ( $error == ERROR_TOKEN_UPDATED ) {
       $scfg->{ '_auth_token' . $i } = $config->{ auth_token };
       $scfg->{ '_request_id' . $i } = $config->{ request_id };
-    } elsif ( $error == 1 ) {
-      my $ignore = $action->{ ignore };
-      if ( defined( $ignore ) ) {
-        $ignore = [$ignore] if ref( $ignore ) eq '';
-        my $first = $content->{ errors }->[0]->{ message };
-        $error = 0 if grep { $_ eq $first } @$ignore;
-      }
+    }
+    # Handle ignorable API errors
+    elsif ( $error == ERROR_API_ERROR && is_ignorable_error( $action, $content ) ) {
+      $error = ERROR_SUCCESS;
     }
 
-    last if $error == 1 || $error <= 0 && !$all;
+    # Stop on critical error or success (unless trying all arrays)
+    last if $error == ERROR_API_ERROR || $error <= ERROR_SUCCESS && !$all;
   }
 
-  if ( $error > 0 ) {
-    my $message = $error == 3 ? 'Authentication' : $action->{ name } || "Action '$type' (method '$method')";
+  # Handle fatal errors
+  if ( $error > ERROR_SUCCESS ) {
+    my $message = $error == ERROR_AUTH_FAILED ? 'Authentication' : $action->{ name } || "Action '$type' (method '$method')";
     $message = substr( $message, 0, 1 ) eq uc( substr( $message, 0, 1 ) ) ? $message . ' failed' : 'Failed to ' . $message;
-    $message = 'PureStorage API :: ' . $message if $error == 1;
+    $message = 'PureStorage API :: ' . $message if $error == ERROR_API_ERROR;
     die "Error :: $message.\n" . "=> Trace:\n" . "==> address: " . $url . "\n" . ( $content ? "==> Message: " . Dumper( $content ) : '' );
   }
 
@@ -603,25 +869,31 @@ sub purestorage_http_request {
 
   my $headers = HTTP::Headers->new( 'Content-Type' => 'application/json' );
 
+  # Determine token state
   my $token_state;
   if ( $login ) {
-    $token_state = 0;    # login request
+    $token_state = TOKEN_STATE_LOGIN;
     $headers->header( 'api-token' => $config->{ token } );
   } elsif ( $config->{ auth_token } ) {
-    $token_state = 2;    # have cached token
+    $token_state = TOKEN_STATE_CACHED;
   } else {
-    $token_state = 1;    # need token
+    $token_state = TOKEN_STATE_NEEDED;
   }
 
   my $error;
   my $response;
   my $content;
-  while ( 1 ) {
-    if ( $token_state > 0 ) {
-      if ( $token_state == 1 ) {
+  my $retry_count = 0;
+  my $max_retries = 1;  # Allow one retry for token refresh
+
+  # Retry loop for token expiration (max 1 retry)
+  while ( $retry_count <= $max_retries ) {
+    # Obtain token if needed
+    if ( $token_state > TOKEN_STATE_LOGIN ) {
+      if ( $token_state == TOKEN_STATE_NEEDED ) {
         print "Debug :: Requesting new session token\n" if $DEBUG;
         ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
-        return ( $error, $content ) if $error > 0;
+        return ( $error, $content ) if $error > ERROR_SUCCESS;
       } else {
         print "Debug :: Using existing session token\n" if $DEBUG;
       }
@@ -629,33 +901,52 @@ sub purestorage_http_request {
     }
     $headers->header( 'X-Request-ID' => $config->{ request_id } ) if $config->{ request_id };
 
+    # Execute HTTP request
     my $request = HTTP::Request->new( $method, $config->{ url } . '/api/' . $PSFA_API . '/' . $path, $headers, length( $body ) ? encode_json( $body ) : undef );
     $response = $config->{ ua }->request( $request );
 
-    $error = $response->is_success ? 0 : 1;
-    if ( $error && $token_state == 2 && $response->code == 401 ) {
-      print "Debug :: Session token expired\n";
-      $token_state = 1;
-      next;
+    # Handle 401 Unauthorized (token expired)
+    $error = $response->is_success ? ERROR_SUCCESS : ERROR_API_ERROR;
+    if ( $error && $token_state == TOKEN_STATE_CACHED && $response->code == 401 ) {
+      $retry_count++;
+      if ( $retry_count <= $max_retries ) {
+        print "Debug :: Session token expired (401), requesting new token (retry $retry_count/$max_retries)\n" if $DEBUG;
+        cleanup_token_cache( $config );
+        $token_state = TOKEN_STATE_NEEDED;
+        next;
+      } else {
+        print "Debug :: Max retries ($max_retries) reached, giving up\n" if $DEBUG;
+        last;
+      }
     }
     last;
   }
 
+  # Process successful response
   $headers = $response->headers;
-  if ( $error == 0 ) {
-    if ( $token_state == 0 ) {
-      $config->{ auth_token } = $headers->header( 'x-auth-token' ) or die "Error :: PureStorage API :: Header 'x-auth-token' is missing.\n";
+  if ( $error == ERROR_SUCCESS ) {
+    if ( $token_state == TOKEN_STATE_LOGIN ) {
+      # Extract tokens from login response
+      $config->{ auth_token } = $headers->header( 'x-auth-token' )
+        or die "Error :: PureStorage API :: Header 'x-auth-token' is missing.\n";
       $config->{ request_id } = $headers->header( 'x-request-id' );
+
+      # Save token to cache
+      save_token_to_cache( $config, $token_state );
     }
-    $error = -1 if $token_state < 2;    # auth_token was updated
+
+    # Signal that token was updated
+    $error = ERROR_TOKEN_UPDATED if $token_state < TOKEN_STATE_CACHED;
   }
 
+  # Parse response content
   $content = $response->decoded_content;
   my $content_type = $headers->header( 'Content-Type' ) // '';
   if ( $content_type =~ /application\/json/ ) {
     $content = decode_json( $content );
   } else {
-    $error   = $login ? 3 : 2 if $error == 1;    # non-API error (connectivity, etc.)
+    # Non-JSON response indicates connectivity/network error
+    $error = $login ? ERROR_AUTH_FAILED : ERROR_NETWORK_ERROR if $error == ERROR_API_ERROR;
     $content = { response => $content };
   }
 
@@ -685,7 +976,7 @@ sub purestorage_get_volumes {
     params => { filter => $filter }
   };
 
-  my $response = purestorage_api_call( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $pref_len = length( purestorage_name_prefix( $scfg ) );
   my @volumes  = map {
@@ -739,7 +1030,7 @@ sub purestorage_get_wwn {
 }
 
 sub purestorage_volume_connection {
-  my ( $class, $scfg, $volname, $mode ) = @_;
+  my ( $class, $storeid, $scfg, $volname, $mode ) = @_;
 
   my $method = $mode ? 'POST' : 'DELETE';
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_connection :: $method\n" if $DEBUG;
@@ -769,7 +1060,7 @@ sub purestorage_volume_connection {
     }
   };
 
-  my $response = purestorage_api_call( $scfg, $action, 1 );
+  my $response = purestorage_api_call( $scfg, $action, 1, $storeid );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
   print "Info :: Volume \"$volname\" is $message host \"$hname\".\n";
@@ -788,7 +1079,7 @@ sub purestorage_create_volume {
     body   => { provisioned => $size }
   };
 
-  my $response = purestorage_api_call( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
   print "Info :: Volume \"$volname\" is created (serial=$serial).\n";
@@ -806,7 +1097,7 @@ sub purestorage_remove_volume {
     $eradicate //= 0;
   }
 
-  # Clean up local device mappings before removing on Pure Storage
+  # Clean up local device mappings before removing from Pure Storage
   my $volume = $class->purestorage_get_volume_info( $scfg, $volname, $storeid, 0 );
   if ( $volume && $volume->{ serial } ) {
     my ( $path, $wwid ) = get_device_path_wwn( $volume->{ serial } );
@@ -814,7 +1105,7 @@ sub purestorage_remove_volume {
     if ( $wwid ne '' && -e "/dev/mapper/$wwid" ) {
       print "Debug :: Cleaning up local device mappings for $wwid\n" if $DEBUG;
 
-      # 1. Remove LVM mappings on the device
+      # 1. Remove LVM mappings on top of the device
       cleanup_lvm_on_device( $wwid );
 
       # 2. Remove partition mappings
@@ -838,7 +1129,7 @@ sub purestorage_remove_volume {
     body   => { destroyed => \1 }
   };
 
-  my $response = purestorage_api_call( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   print "Info :: Volume \"$volname\" is $message.\n";
@@ -851,7 +1142,7 @@ sub purestorage_remove_volume {
       params => $params,
     };
 
-    purestorage_api_call( $scfg, $action );
+    purestorage_api_call( $scfg, $action, 0, $storeid );
 
     print "Info :: Volume \"$volname\" is eradicated.\n";
   }
@@ -860,7 +1151,7 @@ sub purestorage_remove_volume {
 }
 
 sub purestorage_resize_volume {
-  my ( $class, $scfg, $volname, $size ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $size ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_resize_volume\n" if $DEBUG;
 
   my $action = {
@@ -871,7 +1162,7 @@ sub purestorage_resize_volume {
     body   => { provisioned => $size }
   };
 
-  my $response = purestorage_api_call( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $serial = $response->{ items }->[0]->{ serial } or die "Error :: Failed to retrieve volume serial";
 
@@ -909,7 +1200,7 @@ sub purestorage_resize_volume {
 }
 
 sub purestorage_rename_volume {
-  my ( $class, $scfg, $source_volname, $target_volname ) = @_;
+  my ( $class, $scfg, $storeid, $source_volname, $target_volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_rename_volume\n" if $DEBUG;
 
   my $action = {
@@ -920,7 +1211,7 @@ sub purestorage_rename_volume {
     body   => { name  => purestorage_name( $scfg, $target_volname ) }
   };
 
-  purestorage_api_call( $scfg, $action );
+  purestorage_api_call( $scfg, $action, 0, $storeid );
 
   print "Info :: Volume \"$source_volname\" is renamed to \"$target_volname\".\n";
 
@@ -928,7 +1219,7 @@ sub purestorage_rename_volume {
 }
 
 sub purestorage_snap_volume_create {
-  my ( $class, $scfg, $snap_name, $volname ) = @_;
+  my ( $class, $scfg, $storeid, $snap_name, $volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_create\n" if $DEBUG;
 
   my $action = {
@@ -941,14 +1232,14 @@ sub purestorage_snap_volume_create {
     }
   };
 
-  purestorage_api_call( $scfg, $action );
+  purestorage_api_call( $scfg, $action, 0, $storeid );
 
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is created.\n";
   return 1;
 }
 
 sub purestorage_volume_restore {
-  my ( $class, $scfg, $volname, $svolname, $snap, $overwrite ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $svolname, $snap, $overwrite ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_volume_restore\n" if $DEBUG;
 
   my $params = { names => purestorage_name( $scfg, $volname ) };
@@ -966,7 +1257,7 @@ sub purestorage_volume_restore {
     }
   };
 
-  purestorage_api_call( $scfg, $action );
+  purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $source = length( $snap ) ? 'snapshot "' . $snap . '"' : '';
   if ( $volname ne $svolname ) {
@@ -979,7 +1270,7 @@ sub purestorage_volume_restore {
 }
 
 sub purestorage_snap_volume_delete {
-  my ( $class, $scfg, $snap_name, $volname ) = @_;
+  my ( $class, $scfg, $storeid, $snap_name, $volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_snap_volume_delete\n" if $DEBUG;
 
   my $params = { names => purestorage_name( $scfg, $volname, $snap_name ) };
@@ -992,7 +1283,7 @@ sub purestorage_snap_volume_delete {
     params => $params,
     body   => { destroyed => \1 }
   };
-  my $response = purestorage_api_call( $scfg, $action );
+  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is $message.\n";
@@ -1006,7 +1297,7 @@ sub purestorage_snap_volume_delete {
     params => $params,
     body   => { replication_snapshot => \1 }
   };
-  $response = purestorage_api_call( $scfg, $action );
+  $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
   $message = ( $response->{ errors } ? 'already ' : '' ) . 'eradicated';
   print "Info :: Volume \"$volname\" snapshot \"$snap_name\" is $message.\n";
@@ -1062,7 +1353,7 @@ sub clone_image {
 
   my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
 
-  $class->purestorage_volume_restore( $scfg, $name, $volname, $snap );
+  $class->purestorage_volume_restore( $scfg, $storeid, $name, $volname, $snap );
 
   return $name;
 }
@@ -1129,7 +1420,7 @@ sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
 
-  my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' } );
+  my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' }, 0, $storeid );
 
   # Get storage capacity and used space from the response
   my $array = $response->{ items }->[0];
@@ -1251,7 +1542,7 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_volume\n" if $DEBUG;
 
-  $class->purestorage_volume_connection( $scfg, $volname, 1 );
+  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
 
   $class->map_volume( $storeid, $scfg, $volname, $snapname );
   return 1;
@@ -1263,7 +1554,7 @@ sub deactivate_volume {
 
   $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
 
-  $class->purestorage_volume_connection( $scfg, $volname, 0 );
+  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 );
 
   print "Info :: Volume \"$volname\" is deactivated.\n";
 
@@ -1275,7 +1566,7 @@ sub volume_resize {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_resize\n" if $DEBUG;
   warn "Debug :: New Size: $size\n"                                              if $DEBUG;
 
-  return $class->purestorage_resize_volume( $scfg, $volname, $size );
+  return $class->purestorage_resize_volume( $scfg, $storeid, $volname, $size );
 }
 
 sub rename_volume {
@@ -1296,7 +1587,7 @@ sub rename_volume {
   # we need to unmap source volume (see RBDPlugin.pm)
   $class->unmap_volume( $storeid, $scfg, $source_volname );
 
-  $class->purestorage_rename_volume( $scfg, $source_volname, $target_volname );
+  $class->purestorage_rename_volume( $scfg, $storeid, $source_volname, $target_volname );
 
   return "$storeid:$target_volname";
 }
@@ -1313,7 +1604,7 @@ sub volume_snapshot {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot\n" if $DEBUG;
 
-  $class->purestorage_snap_volume_create( $scfg, $snap, $volname );
+  $class->purestorage_snap_volume_create( $scfg, $storeid, $snap, $volname );
 
   return 1;
 }
@@ -1322,7 +1613,7 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot_rollback\n" if $DEBUG;
 
-  $class->purestorage_volume_restore( $scfg, $volname, $volname, $snap, 1 );
+  $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1 );
 
   return 1;
 }
@@ -1331,7 +1622,7 @@ sub volume_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_snapshot_delete\n" if $DEBUG;
 
-  $class->purestorage_snap_volume_delete( $scfg, $snap, $volname );
+  $class->purestorage_snap_volume_delete( $scfg, $storeid, $snap, $volname );
 
   return 1;
 }
