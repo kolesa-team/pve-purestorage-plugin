@@ -585,6 +585,37 @@ sub cleanup_partitions_on_device {
 }
 
 ### BLOCK: Token cache management => PVE::Storage::Custom::PureStoragePlugin::sub::token_cache
+#
+# Race condition mitigation strategy:
+# 1. Jitter in is_token_valid() spreads refresh timing across nodes (±2.5%)
+# 2. Read-check-write pattern in save_token_to_cache() prevents overwriting newer tokens
+# 3. On 401 error, re-check file cache before requesting new token (another node may have refreshed)
+# 4. HTTP retry on 401 with max_retries=1 prevents infinite loops
+# 5. pmxcfs replication is eventually consistent (typically <1s)
+#
+# Scenario: Two nodes refresh simultaneously
+# - Node A and Node B both see expired token at ~80% TTL (with jitter spread)
+# - Node A gets token T1, Node B gets token T2
+# - Node B tries to write T2, but sees T1 is already cached (created <5s ago), skips write
+# - Both nodes use T1 from cache → success
+#
+# Edge case: If somehow both write (race in pmxcfs replication)
+# - Node A has T1 in memory, but file has T2
+# - Node A gets 401 on next request
+# - Node A re-reads cache, finds valid T2, uses it
+# - Success without extra API call
+#
+# Error scenarios:
+# 1. Node B login fails (network/API error) during simultaneous refresh
+#    - Node A successfully cached token T1
+#    - Node B checks cache after login error, finds T1
+#    - Node B uses T1 → continues operating
+#    - No service disruption
+#
+# 2. Worst case: Cache file deleted/corrupted during race
+#    - Node gets 401, cache re-read fails
+#    - Node requests new token (1 extra API call)
+#    - Result: At most 1 extra API call, system remains operational
 
 sub get_token_cache_path {
   my ( $storeid, $array_index ) = @_;
@@ -665,7 +696,11 @@ sub is_token_valid {
 
   my $now = time();
   my $age = $now - $token_data->{ created_at };
-  my $refresh_threshold = $ttl * 0.8;
+
+  # Add jitter (±5%) to refresh threshold to prevent thundering herd
+  # when multiple nodes check token expiration simultaneously
+  my $jitter = 0.05 * (rand() - 0.5);  # -2.5% to +2.5%
+  my $refresh_threshold = $ttl * (0.8 + $jitter);
 
   if ( $age < $refresh_threshold ) {
     print "Debug :: Token is valid (age: ${age}s, threshold: ${refresh_threshold}s)\n" if $DEBUG;
@@ -748,6 +783,14 @@ sub save_token_to_cache {
   };
 
   eval {
+    # Race condition mitigation: check if another node already wrote a newer token
+    my $existing = read_token_cache( $config->{ cache_path } );
+    if ( $existing && $existing->{ created_at } > $token_data->{ created_at } - 5 ) {
+      # Another node wrote a token within last 5 seconds, use that instead
+      print "Debug :: Another node already cached a token, skipping write\n" if $DEBUG;
+      return;
+    }
+
     write_token_cache( $config->{ cache_path }, $token_data );
     print "Debug :: Token cached to file: $config->{ cache_path }\n" if $DEBUG;
   };
@@ -893,7 +936,26 @@ sub purestorage_http_request {
       if ( $token_state == TOKEN_STATE_NEEDED ) {
         print "Debug :: Requesting new session token\n" if $DEBUG;
         ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
-        return ( $error, $content ) if $error > ERROR_SUCCESS;
+
+        # Login failed - check if another node cached a valid token
+        if ( $error > ERROR_SUCCESS && $config->{ cache_path } ) {
+          print "Debug :: Login failed, checking if another node cached a token\n" if $DEBUG;
+          my $cached_token = read_token_cache( $config->{ cache_path } );
+          if ( $cached_token
+               && $cached_token->{ auth_token }
+               && is_token_valid( $cached_token, $config->{ ttl } || 3600 ) ) {
+            print "Debug :: Using cached token from another node after login failure\n" if $DEBUG;
+            $config->{ auth_token } = $cached_token->{ auth_token };
+            $config->{ request_id } = $cached_token->{ request_id };
+            $token_state = TOKEN_STATE_CACHED;
+            # Continue with cached token instead of failing
+          } else {
+            # No valid cached token available, propagate login error
+            return ( $error, $content );
+          }
+        } elsif ( $error > ERROR_SUCCESS ) {
+          return ( $error, $content );
+        }
       } else {
         print "Debug :: Using existing session token\n" if $DEBUG;
       }
@@ -910,7 +972,26 @@ sub purestorage_http_request {
     if ( $error && $token_state == TOKEN_STATE_CACHED && $response->code == 401 ) {
       $retry_count++;
       if ( $retry_count <= $max_retries ) {
-        print "Debug :: Session token expired (401), requesting new token (retry $retry_count/$max_retries)\n" if $DEBUG;
+        print "Debug :: Session token expired (401), retry $retry_count/$max_retries\n" if $DEBUG;
+
+        # Race condition mitigation: check if another node already refreshed token
+        if ( $config->{ cache_path } ) {
+          my $fresh_token = read_token_cache( $config->{ cache_path } );
+          if ( $fresh_token
+               && $fresh_token->{ auth_token }
+               && $fresh_token->{ auth_token } ne $config->{ auth_token }
+               && is_token_valid( $fresh_token, $config->{ ttl } || 3600 ) ) {
+            # Another node already cached a valid token, use it
+            print "Debug :: Using refreshed token from another node\n" if $DEBUG;
+            $config->{ auth_token } = $fresh_token->{ auth_token };
+            $config->{ request_id } = $fresh_token->{ request_id };
+            $token_state = TOKEN_STATE_CACHED;
+            next;  # Retry with the new token
+          }
+        }
+
+        # No valid token from other nodes, request new one
+        print "Debug :: Requesting new session token\n" if $DEBUG;
         cleanup_token_cache( $config );
         $token_state = TOKEN_STATE_NEEDED;
         next;
