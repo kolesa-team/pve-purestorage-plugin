@@ -49,7 +49,7 @@ jobs:
 
     - name: Check changed Perl files
       id: changed-files-perl
-      uses: tj-actions/changed-files@v46
+      uses: tj-actions/changed-files@v47
       with:
         files: |
           **/*.pm
@@ -57,14 +57,14 @@ jobs:
 
     - name: Check changed Markdown files
       id: changed-files-markdown
-      uses: tj-actions/changed-files@v46
+      uses: tj-actions/changed-files@v47
       with:
         files: |
           **/*.md
 
     - name: Check changed test files
       id: changed-files-test
-      uses: tj-actions/changed-files@v46
+      uses: tj-actions/changed-files@v47
       with:
         files: |
           tests/**/*.t
