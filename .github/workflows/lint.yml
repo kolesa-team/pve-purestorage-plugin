@@ -62,7 +62,7 @@ jobs:
             echo "Checking formatting: $file"
             if command -v perltidy >/dev/null 2>&1; then
               formatted_file="${file}.formatted"
-              perltidy "$file" -o "$formatted_file" 2>/dev/null || true
+              perltidy -pro=.perltidyrc "$file" -o "$formatted_file" 2>/dev/null || true
               if [ -f "$formatted_file" ]; then
                 if ! diff -q "$file" "$formatted_file" >/dev/null 2>&1; then
                   echo "::error file=$file::File is not properly formatted. Run 'perltidy $file' to fix."
