@@ -1,0 +1,66 @@
+name: Checks
+run-name: Checks on ${{ github.ref_name }} by ${{ github.actor }}
+
+on:
+  push:
+
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-changes:
+    name: Check changed files
+    runs-on: ubuntu-22.04
+    outputs:
+      perl-changed: ${{ steps.changed-files-perl.outputs.any_changed }}
+      markdown-changed: ${{ steps.changed-files-markdown.outputs.any_changed }}
+      test-changed: ${{ steps.changed-files-test.outputs.any_changed }}
+      perl-files: ${{ steps.changed-files-perl.outputs.all_changed_files }}
+      markdown-files: ${{ steps.changed-files-markdown.outputs.all_changed_files }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check changed Perl files
+      id: changed-files-perl
+      uses: tj-actions/changed-files@v44
+      with:
+        files: |
+          **/*.pm
+          **/*.pl
+
+    - name: Check changed Markdown files
+      id: changed-files-markdown
+      uses: tj-actions/changed-files@v44
+      with:
+        files: |
+          **/*.md
+
+    - name: Check changed test files
+      id: changed-files-test
+      uses: tj-actions/changed-files@v44
+      with:
+        files: |
+          tests/**/*.t
+          tests/**/*.pl
+
+  lint:
+    name: Lint
+    needs: check-changes
+    if: needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.markdown-changed == 'true'
+    uses: ./.github/workflows/lint.yml
+    with:
+      enable-perl-lint: ${{ needs.check-changes.outputs.perl-changed == 'true' }}
+      enable-markdown-lint: ${{ needs.check-changes.outputs.markdown-changed == 'true' }}
+      perl-files: ${{ needs.check-changes.outputs.perl-files }}
+      markdown-files: ${{ needs.check-changes.outputs.markdown-files }}
+
+  test:
+    name: Tests
+    needs: check-changes
+    if: needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.test-changed == 'true'
+    uses: ./.github/workflows/tests.yml

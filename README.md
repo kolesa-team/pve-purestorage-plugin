@@ -1,5 +1,7 @@
 # Proxmox VE Plugin for Pure Storage as Multipath iSCSI Source
 
+[![Checks](https://github.com/kolesa-team/pve-purestorage-plugin/actions/workflows/checks.yml/badge.svg)](https://github.com/kolesa-team/pve-purestorage-plugin/actions/workflows/checks.yml)
+
 This plugin enables the integration of Pure Storage arrays with Proxmox Virtual Environment (VE) using multipath iSCSI or Fibre Channel (FC). It allows you to use Pure Storage as a backend for your virtual machine disks, providing high performance and reliability.
 
 ## Table of Contents

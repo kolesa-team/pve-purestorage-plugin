@@ -1,0 +1,45 @@
+name: Tests
+run-name: Tests - ${{ github.ref_name }}
+
+on:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Perl
+      uses: shogo82148/actions-setup-perl@v1
+      with:
+        perl-version: '5.34'
+        install-cpanm: true
+
+    - name: Install Perl dependencies
+      run: |
+        cpanm --notest Test::More JSON JSON::XS
+
+    - name: Check changed files
+      id: changed-files
+      uses: tj-actions/changed-files@v44
+      with:
+        files: |
+          **/*.pm
+          **/*.pl
+          tests/**/*.t
+          tests/**/*.pl
+
+    - name: Run tests
+      if: steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        chmod +x tests/run_tests.sh
+        ./tests/run_tests.sh
