@@ -11,7 +11,6 @@ use File::Path ();
 use PVE::JSONSchema      ();
 use PVE::Network         ();
 use PVE::Tools           qw( file_read_firstline run_command );
-use PVE::Tools           qw( file_read_firstline run_command );
 use PVE::INotify         ();
 use PVE::Storage::Plugin ();
 
@@ -22,7 +21,6 @@ use HTTP::Request  ();
 use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename );
 use Time::HiRes    qw( gettimeofday sleep );
-use Cwd            qw( abs_path );
 use Cwd            qw( abs_path );
 
 use base qw(PVE::Storage::Plugin);
@@ -87,7 +85,6 @@ sub api {
   # PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
 
   my $tested_apiver = 12;
-  my $tested_apiver = 12;
 
   my $apiver = PVE::Storage::APIVER;
   my $apiage = PVE::Storage::APIAGE;
@@ -122,25 +119,13 @@ sub properties {
       description => "Host group suffx.",
       type        => 'string',
       default     => $default_hgsuffix
-      type        => 'string',
-      default     => $default_hgsuffix
     },
     address => {
       description => "PureStorage Management IP address or DNS name.",
       type        => 'string'
-      type        => 'string'
     },
     token => {
       description => "Storage API token.",
-      type        => 'string'
-    },
-    podname => {
-      description => "PureStorage pod name",
-      type        => 'string'
-    },
-    vnprefix => {
-      description => "Prefix to add to volume name before sending it to PureStorage array",
-      type        => 'string'
       type        => 'string'
     },
     podname => {
@@ -181,10 +166,6 @@ sub options {
     address => { fixed => 1 },
     token   => { fixed => 1 },
 
-    hgsuffix  => { optional => 1 },
-    vgname    => { optional => 1 },
-    podname   => { optional => 1 },
-    vnprefix  => { optional => 1 },
     hgsuffix  => { optional => 1 },
     vgname    => { optional => 1 },
     podname   => { optional => 1 },
@@ -907,7 +888,7 @@ sub try_cached_token {
   $config->{ auth_token } = $cached_token->{ auth_token };
   $config->{ request_id } = $cached_token->{ request_id };
 
-  return \@volumes;
+  return 1;
 }
 
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
@@ -1316,9 +1297,12 @@ sub purestorage_remove_volume {
     }
   }
 
-  # Disconnect volume from all hosts before destroying
-  print "Debug :: Disconnecting volume from all hosts\n" if $DEBUG >= 2;
+  # Disconnect volume from all hosts on all arrays before destroying
+  # For Active Cluster: get connections from first array (they are synced) and disconnect from all hosts
+  print "Debug :: Disconnecting volume from all hosts on all arrays\n" if $DEBUG >= 2;
   my $pure_volname = purestorage_name( $scfg, $volname );
+
+  # Get list of all connections (from first array - in Active Cluster connections are synced)
   my $connections_action = {
     name   => 'list volume connections',
     type   => 'connections',
@@ -1331,9 +1315,17 @@ sub purestorage_remove_volume {
 
   if ( @connections ) {
     print "Debug :: Found " . scalar( @connections ) . " connection(s) for volume \"$volname\"\n" if $DEBUG >= 1;
+
+    # Collect unique hostnames
+    my %unique_hosts;
     foreach my $conn ( @connections ) {
       my $hostname = $conn->{ host }->{ name };
-      print "Debug :: Disconnecting from host \"$hostname\"\n" if $DEBUG >= 2;
+      $unique_hosts{ $hostname } = 1;
+    }
+
+    # Disconnect from each unique host on all arrays
+    foreach my $hostname ( keys %unique_hosts ) {
+      print "Debug :: Disconnecting from host \"$hostname\" on all arrays\n" if $DEBUG >= 2;
 
       my $disconnect_action = {
         name   => 'delete volume connection',
@@ -1346,13 +1338,13 @@ sub purestorage_remove_volume {
         }
       };
 
+      # For Active Cluster: disconnect from this host on all arrays
       purestorage_api_call( $scfg, $disconnect_action, 1, $storeid );
     }
-    print "Info :: Volume \"$volname\" disconnected from all hosts.\n";
+    print "Info :: Volume \"$volname\" disconnected from " . scalar( keys %unique_hosts ) . " host(s) on all arrays.\n";
   } else {
     print "Debug :: No connections found for volume \"$volname\"\n" if $DEBUG >= 2;
   }
-
   my $params = { names => $pure_volname };
   my $action = {
     name   => 'destroy volume',
@@ -1363,7 +1355,8 @@ sub purestorage_remove_volume {
     body   => { destroyed => \1 }
   };
 
-  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
+  # For Active Cluster: destroy volume on all arrays
+  my $response = purestorage_api_call( $scfg, $action, 1, $storeid );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   print "Info :: Volume \"$volname\" is $message.\n";
@@ -1377,7 +1370,8 @@ sub purestorage_remove_volume {
       params => $params,
     };
 
-    purestorage_api_call( $scfg, $action, 0, $storeid );
+    # For Active Cluster: eradicate volume on all arrays
+    purestorage_api_call( $scfg, $action, 1, $storeid );
 
     print "Info :: Volume \"$volname\" is eradicated.\n";
   }
@@ -1552,10 +1546,7 @@ sub parse_volname {
 
     # ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
     return ( $vtype, $name, $vmid, undef, undef, undef, 'raw' );
-    # ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format)
-    return ( $vtype, $name, $vmid, undef, undef, undef, 'raw' );
   }
-
 
   die "Error :: Invalid volume name ($volname).\n";
   return 0;
@@ -1565,12 +1556,6 @@ sub filesystem_path {
   my ( $class, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::filesystem_path\n" if $DEBUG;
 
-  die "Error :: filesystem_path: snapshot is not implemented ($snapname)\n" if defined($snapname);
-
-  # do we even need this?
-  my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
-
-  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
   die "Error :: filesystem_path: snapshot is not implemented ($snapname)\n" if defined($snapname);
 
   # do we even need this?
@@ -1608,8 +1593,6 @@ sub find_free_diskname {
 
   my $volumes   = $class->purestorage_list_volumes( $scfg, $vmid, $storeid );
   my @disk_list = map { $_->{ name } } @$volumes;
-  my $volumes   = $class->purestorage_list_volumes( $scfg, $vmid, $storeid );
-  my @disk_list = map { $_->{ name } } @$volumes;
 
   return PVE::Storage::Plugin::get_next_vm_diskname( \@disk_list, $storeid, $vmid, undef, $scfg );
 }
@@ -1627,20 +1610,8 @@ sub alloc_image {
   } else {
     $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
   }
-  if ( defined( $name ) ) {
-    die "Error :: Illegal name \"$name\" - should be \"vm-$vmid-(disk-*|cloudinit|state-*)\".\n" if $name !~ m/^vm-$vmid-(disk-|cloudinit|state-)/;
-  } else {
-    $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
-  }
 
   # Check size (must be between 1MB and 4PB)
-  if ( $size < 1024 ) {
-    print "Info :: Size is too small ($size kb), adjusting to 1024 kb\n";
-    $size = 1024;
-  }
-
-  # Convert size from KB to bytes
-  my $sizeB = $size * 1024;    # KB => B
   if ( $size < 1024 ) {
     print "Info :: Size is too small ($size kb), adjusting to 1024 kb\n";
     $size = 1024;
@@ -1651,7 +1622,6 @@ sub alloc_image {
 
   if ( !$class->purestorage_create_volume( $scfg, $name, $sizeB, $storeid ) ) {
     die "Error :: Failed to create volume \"$name\".\n";
-    die "Error :: Failed to create volume \"$name\".\n";
   }
 
   return $name;
@@ -1660,8 +1630,6 @@ sub alloc_image {
 sub free_image {
   my ( $class, $storeid, $scfg, $volname, $isBase ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::free_image\n" if $DEBUG;
-
-  $class->deactivate_volume( $storeid, $scfg, $volname );
 
   $class->deactivate_volume( $storeid, $scfg, $volname );
 
@@ -1675,7 +1643,6 @@ sub list_images {
   set_debug_from_config( $scfg );
   print "Debug :: list_images ($storeid, vmid=" . ( $vmid // 'all' ) . ")\n" if $DEBUG >= 1;
 
-  return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
   return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
 }
 
@@ -1725,13 +1692,11 @@ sub status {
 
   # Calculate free space
   my $free = $total - $used;
-  my $free = $total - $used;
 
   # Mark storage as active
   my $active = 1;
 
   # Return total, free, used space and the active status
-  return ( $total, $free, $used, $active );
   return ( $total, $free, $used, $active );
 }
 
@@ -1755,14 +1720,7 @@ sub volume_size_info {
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::volume_size_info\n" if $DEBUG;
 
   my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
-  my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
 
-  #TODO: Consider moving this inside of purestorage_get_existing_volume_info()
-  die "Error :: PureStorage API :: No volume data found for \"$volname\".\n" unless $volume;
-
-  print "Debug :: Provisioned: " . $volume->{ size } . ", Used: " . $volume->{ used } . "\n" if $DEBUG;
-
-  return wantarray ? ( $volume->{ size }, 'raw', $volume->{ used }, undef ) : $volume->{ size };
   #TODO: Consider moving this inside of purestorage_get_existing_volume_info()
   die "Error :: PureStorage API :: No volume data found for \"$volname\".\n" unless $volume;
 
@@ -1775,18 +1733,9 @@ sub map_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::map_volume\n" if $DEBUG;
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
-  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
   print "Debug :: Mapping volume \"$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
-  print "Debug :: Mapping volume \"$volname\" with WWN: " . uc( $wwid ) . ".\n" if $DEBUG;
 
-  my $protocol = $scfg->{ protocol } // $default_protocol;
-  if ( $protocol eq 'iscsi' || $protocol eq 'fc' ) {
-    scsi_scan_new( $protocol );
-  } elsif ( $protocol eq 'nvme' ) {
-    die "Error :: Protocol: \"$protocol\" isn't implemented yet.\n";
-  } else {
-    die "Error :: Protocol: \"$protocol\" isn't a valid protocol.\n";
   my $protocol = $scfg->{ protocol } // $default_protocol;
   if ( $protocol eq 'iscsi' || $protocol eq 'fc' ) {
     scsi_scan_new( $protocol );
@@ -1796,9 +1745,6 @@ sub map_volume {
     die "Error :: Protocol: \"$protocol\" isn't a valid protocol.\n";
   }
 
-  my $path_exists = sub {
-    return -e $path;
-  };
   my $path_exists = sub {
     return -e $path;
   };
@@ -1855,11 +1801,6 @@ sub unmap_volume {
 
   print "Debug :: Device \"$wwid\" is removed.\n" if $DEBUG;
   return 1;
-  # Iterate through slaves and remove each device
-  block_device_action( 'remove', @slaves );
-
-  print "Debug :: Device \"$wwid\" is removed.\n" if $DEBUG;
-  return 1;
 }
 
 sub activate_volume {
@@ -1897,21 +1838,8 @@ sub rename_volume {
   my ( $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::rename_volume\n" if $DEBUG;
 
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::rename_volume\n" if $DEBUG;
-
   die "Error :: not implemented in storage plugin \"$class\".\n" if $class->can( 'api' ) && $class->api() < 10;
 
-  if ( length( $target_volname ) ) {
-
-    # See RBDPlugin.pm (note, currently PVE does not supply $target_volname parameter)
-    my $volume = $class->purestorage_get_volume_info( $scfg, $target_volname, $storeid );
-    die "target volume '$target_volname' already exists\n" if $volume;
-  } else {
-    $target_volname = $class->find_free_diskname( $storeid, $scfg, $target_vmid );
-  }
-
-  # we need to unmap source volume (see RBDPlugin.pm)
-  $class->unmap_volume( $storeid, $scfg, $source_volname );
   if ( length( $target_volname ) ) {
 
     # See RBDPlugin.pm (note, currently PVE does not supply $target_volname parameter)
@@ -1975,15 +1903,8 @@ sub volume_has_feature {
                                                   # template => { current => 1 }, # conversion to base image is possible
     sparseinit => { current => 1 },               # thin provisioning is supported
     rename     => { current => 1 },               # renaming volumes is possible
-    copy       => { current => 1, snap => 1 },    # full clone is possible
-    clone      => { current => 1, snap => 1 },    # linked clone is possible
-    snapshot   => { current => 1 },               # taking a snapshot is possible
-                                                  # template => { current => 1 }, # conversion to base image is possible
-    sparseinit => { current => 1 },               # thin provisioning is supported
-    rename     => { current => 1 },               # renaming volumes is possible
   };
   my ( $vtype, $name, $vmid, $basename, $basevmid, $isBase ) = $class->parse_volname( $volname );
-  my $key;
   my $key;
   if ( $snapname ) {
     $key = "snap";
