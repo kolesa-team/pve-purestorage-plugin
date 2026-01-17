@@ -33,17 +33,17 @@ $Data::Dumper::Useqq  = 1;    # Uses quotes for strings
 # Error code constants for API requests
 use constant {
   ERROR_TOKEN_UPDATED => -1,    # Token was refreshed (success, but need to update cache)
-  ERROR_SUCCESS       => 0,     # Request succeeded
-  ERROR_API_ERROR     => 1,     # PureStorage API returned an error
-  ERROR_NETWORK_ERROR => 2,     # Network or connectivity error
-  ERROR_AUTH_FAILED   => 3,     # Authentication failed
+  ERROR_SUCCESS       =>  0,    # Request succeeded
+  ERROR_API_ERROR     =>  1,    # PureStorage API returned an error
+  ERROR_NETWORK_ERROR =>  2,    # Network or connectivity error
+  ERROR_AUTH_FAILED   =>  3,    # Authentication failed
 };
 
 # Token state constants for authentication state machine
 use constant {
-  TOKEN_STATE_LOGIN  => 0,    # Performing login request (using api-token)
-  TOKEN_STATE_NEEDED => 1,    # Need to obtain session token
-  TOKEN_STATE_CACHED => 2,    # Have valid cached session token
+  TOKEN_STATE_LOGIN  => 0,      # Performing login request (using api-token)
+  TOKEN_STATE_NEEDED => 1,      # Need to obtain session token
+  TOKEN_STATE_CACHED => 2,      # Have valid cached session token
 };
 
 my $PSFA_API               = '2.26';
@@ -72,17 +72,17 @@ sub set_debug_from_config {
 ### BLOCK: Configuration
 sub api {
 
-  # PVE 5:   APIVER  2
-  # PVE 6:   APIVER  3
-  # PVE 6:   APIVER  4 e6f4eed43581de9b9706cc2263c9631ea2abfc1a / volume_has_feature
-  # PVE 6:   APIVER  5 a97d3ee49f21a61d3df10d196140c95dde45ec27 / allow rename
-  # PVE 6:   APIVER  6 8f26b3910d7e5149bfa495c3df9c44242af989d5 / prune_backups (fine, we don't support that content type)
-  # PVE 6:   APIVER  7 2c036838ed1747dabee1d2c79621c7d398d24c50 / volume_snapshot_needs_fsfreeze (guess we are fine, upstream only implemented it for RDBPlugin; we are not that different to let's say LVM in this regard)
-  # PVE 6:   APIVER  8 343ca2570c3972f0fa1086b020bc9ab731f27b11 / prune_backups (fine again, see APIVER 6)
-  # PVE 7:   APIVER  9 3cc29a0487b5c11592bf8b16e96134b5cb613237 / resets APIAGE! changes volume_import/volume_import_formats
-  # PVE 7.1: APIVER 10 a799f7529b9c4430fee13e5b939fe3723b650766 / rm/add volume_snapshot_{list,info} (not used); blockers to volume_rollback_is_possible (not used)
-  # PVE 8.4: APIVER 11 e2dc01ac9f06fe37cf434bad9157a50ecc4a99ce / new_backup_provider/sensitive_properties; backup provider might be interesting, we can look at it later
-  # PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
+# PVE 5:   APIVER  2
+# PVE 6:   APIVER  3
+# PVE 6:   APIVER  4 e6f4eed43581de9b9706cc2263c9631ea2abfc1a / volume_has_feature
+# PVE 6:   APIVER  5 a97d3ee49f21a61d3df10d196140c95dde45ec27 / allow rename
+# PVE 6:   APIVER  6 8f26b3910d7e5149bfa495c3df9c44242af989d5 / prune_backups (fine, we don't support that content type)
+# PVE 6:   APIVER  7 2c036838ed1747dabee1d2c79621c7d398d24c50 / volume_snapshot_needs_fsfreeze (guess we are fine, upstream only implemented it for RDBPlugin; we are not that different to let's say LVM in this regard)
+# PVE 6:   APIVER  8 343ca2570c3972f0fa1086b020bc9ab731f27b11 / prune_backups (fine again, see APIVER 6)
+# PVE 7:   APIVER  9 3cc29a0487b5c11592bf8b16e96134b5cb613237 / resets APIAGE! changes volume_import/volume_import_formats
+# PVE 7.1: APIVER 10 a799f7529b9c4430fee13e5b939fe3723b650766 / rm/add volume_snapshot_{list,info} (not used); blockers to volume_rollback_is_possible (not used)
+# PVE 8.4: APIVER 11 e2dc01ac9f06fe37cf434bad9157a50ecc4a99ce / new_backup_provider/sensitive_properties; backup provider might be interesting, we can look at it later
+# PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
 
   my $tested_apiver = 12;
 
@@ -90,14 +90,15 @@ sub api {
   my $apiage = PVE::Storage::APIAGE;
 
   # the plugin supports multiple PVE generations, currently we did not break anything, tell them what they want to hear if possible
-  if ($apiver >= 2 and $apiver <= $tested_apiver) {
-     return $apiver;
+  if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
+    return $apiver;
   }
 
   # if we are still in the APIAGE, we can still report what we have
-  if ($apiver - $apiage < $tested_apiver) {
-     return $tested_apiver;
+  if ( $apiver - $apiage < $tested_apiver ) {
+    return $tested_apiver;
   }
+
   # lowest apiver we support
   return 10;
 }
@@ -149,7 +150,7 @@ sub properties {
     token_ttl => {
       description => "Session token time-to-live in seconds.",
       type        => 'integer',
-      default     => 3600  # Max 10h
+      default     => 3600                                        # Max 10h
     },
     debug => {
       description => "Enable debug logging (0=off, 1=basic, 2=verbose, 3=trace).",
@@ -251,10 +252,9 @@ sub exec_command {
   # Try to resolve command path if it's a known command name
   my $cmd_name = $command->[0];
   if ( exists $cmd->{ $cmd_name } ) {
-    eval {
-      $command->[0] = get_command_path( $cmd_name );
-    };
+    eval { $command->[0] = get_command_path( $cmd_name ); };
     if ( $@ ) {
+
       # Command not available, but continue with original name
       # This allows system PATH resolution as fallback
       warn "Warning :: $@" if $dm >= 0;
@@ -312,7 +312,7 @@ sub multipath_check {
   # TODO: Find a better check
   # TODO: Support non-multipath mode
   my $multipath_cmd = get_command_path( 'multipath' );
-  my $output = `$multipath_cmd -l $wwid 2>/dev/null`;
+  my $output        = `$multipath_cmd -l $wwid 2>/dev/null`;
 
   return $output ne '';
 }
@@ -533,12 +533,15 @@ sub cleanup_lvm_on_device {
 
   my @dm_devices;
   eval {
-    run_command( [ get_command_path( 'dmsetup' ), 'ls' ], outfunc => sub {
-      my $line = shift;
-      if ( $line =~ /^(\S+)\s+\(/ ) {
-        push @dm_devices, $1;
+    run_command(
+      [ get_command_path( 'dmsetup' ), 'ls' ],
+      outfunc => sub {
+        my $line = shift;
+        if ( $line =~ /^(\S+)\s+\(/ ) {
+          push @dm_devices, $1;
+        }
       }
-    });
+    );
   };
   return 0 if $@;
 
@@ -548,9 +551,11 @@ sub cleanup_lvm_on_device {
 
     my $deps = '';
     eval {
-      run_command( [ get_command_path( 'dmsetup' ), 'deps', '-o', 'devname', $dm ],
+      run_command(
+        [ get_command_path( 'dmsetup' ), 'deps', '-o', 'devname', $dm ],
         outfunc => sub { $deps .= shift; },
-        errfunc => sub { } );
+        errfunc => sub { }
+      );
     };
 
     if ( $deps =~ /${wwid}/ ) {
@@ -680,6 +685,7 @@ sub read_token_cache {
   };
   if ( $@ ) {
     warn "Warning :: Failed to read token cache from $cache_path: $@\n";
+
     # Delete corrupt cache file
     eval { unlink $cache_path };
     return undef;
@@ -711,6 +717,7 @@ sub write_token_cache {
   };
   if ( $@ ) {
     warn "Warning :: Failed to write token cache to $cache_path: $@\n";
+
     # Clean up temp file if it exists
     eval { unlink $temp_path if -f $temp_path };
     die $@;
@@ -730,8 +737,8 @@ sub is_token_valid {
 
   # Add jitter (±5%) to refresh threshold to prevent thundering herd
   # when multiple nodes check token expiration simultaneously
-  my $jitter = 0.05 * (rand() - 0.5);  # -2.5% to +2.5%
-  my $refresh_threshold = $ttl * (0.8 + $jitter);
+  my $jitter            = 0.05 * ( rand() - 0.5 );    # -2.5% to +2.5%
+  my $refresh_threshold = $ttl * ( 0.8 + $jitter );
 
   print "Debug :: Token validation: now=$now, created_at=$token_data->{ created_at }, age=${age}s, threshold=${refresh_threshold}s\n" if $DEBUG >= 2;
 
@@ -771,19 +778,14 @@ sub load_auth_token {
   my ( $storeid, $array_index, $scfg ) = @_;
 
   my $cache_path = defined( $storeid ) ? get_token_cache_path( $storeid, $array_index ) : undef;
-  my $ttl = $scfg->{ token_ttl } || 3600;
+  my $ttl        = $scfg->{ token_ttl } || 3600;
 
   # Try in-memory cache first (fastest, no I/O)
-  my $mem_token_key = '_auth_token' . $array_index;
+  my $mem_token_key      = '_auth_token' . $array_index;
   my $mem_request_id_key = '_request_id' . $array_index;
   if ( defined( $scfg->{ $mem_token_key } ) && $scfg->{ $mem_token_key } ne '' ) {
     print "Debug :: Using cached token from memory\n" if $DEBUG >= 2;
-    return (
-      $scfg->{ $mem_token_key },
-      $scfg->{ $mem_request_id_key },
-      $cache_path,
-      $ttl
-    );
+    return ( $scfg->{ $mem_token_key }, $scfg->{ $mem_request_id_key }, $cache_path, $ttl );
   }
 
   # Try file cache
@@ -792,15 +794,11 @@ sub load_auth_token {
     if ( $cached_token && is_token_valid( $cached_token, $ttl ) ) {
       my $age = time() - $cached_token->{ created_at };
       print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG >= 1;
+
       # Update in-memory cache for faster access next time
-      $scfg->{ $mem_token_key } = $cached_token->{ auth_token };
+      $scfg->{ $mem_token_key }      = $cached_token->{ auth_token };
       $scfg->{ $mem_request_id_key } = $cached_token->{ request_id };
-      return (
-        $cached_token->{ auth_token },
-        $cached_token->{ request_id },
-        $cache_path,
-        $ttl
-      );
+      return ( $cached_token->{ auth_token }, $cached_token->{ request_id }, $cache_path, $ttl );
     }
   }
 
@@ -832,6 +830,7 @@ sub save_token_to_cache {
     # Race condition mitigation: check if another node already wrote a newer token
     my $existing = read_token_cache( $config->{ cache_path } );
     if ( $existing && $existing->{ created_at } > $token_data->{ created_at } - 5 ) {
+
       # Another node wrote a token within last 5 seconds, use that instead
       print "Debug :: Another node already cached a token, skipping write\n" if $DEBUG >= 2;
       return;
@@ -851,12 +850,7 @@ sub cleanup_token_cache {
 
   return unless $config->{ cache_path };
 
-  eval {
-    cleanup_expired_cache(
-      $config->{ cache_path },
-      $config->{ ttl } || 3600
-    );
-  };
+  eval { cleanup_expired_cache( $config->{ cache_path }, $config->{ ttl } || 3600 ); };
 }
 
 sub is_ignorable_error {
@@ -923,8 +917,8 @@ sub purestorage_api_call {
   my @urls   = split( ',', $scfg->{ address } // '' );
   my @tokens = split( ',', $scfg->{ token }   // '' );
 
-  my $array_count = 0;
-  my $success_count = 0;
+  my $array_count        = 0;
+  my $success_count      = 0;
   my $last_success_error = ERROR_SUCCESS;
   my $last_success_content;
 
@@ -958,6 +952,7 @@ sub purestorage_api_call {
       $scfg->{ '_auth_token' . $i } = $config->{ auth_token };
       $scfg->{ '_request_id' . $i } = $config->{ request_id };
     }
+
     # Handle ignorable API errors
     elsif ( $error == ERROR_API_ERROR && is_ignorable_error( $action, $content ) ) {
       $error = ERROR_SUCCESS;
@@ -966,7 +961,7 @@ sub purestorage_api_call {
     # Track success for this array
     if ( $error <= ERROR_SUCCESS ) {
       $success_count++;
-      $last_success_error = $error;
+      $last_success_error   = $error;
       $last_success_content = $content;
       print "Debug :: Array " . ( $i + 1 ) . " ($url) succeeded\n" if $DEBUG >= 2;
     }
@@ -979,6 +974,7 @@ sub purestorage_api_call {
     # Handle API errors in Active Cluster mode
     if ( $error == ERROR_API_ERROR ) {
       if ( $all && $success_count > 0 ) {
+
         # Continue to next array - partial success acceptable in Active Cluster
         print "Warning :: Array " . ( $i + 1 ) . " ($url) failed but array(s) succeeded. Continuing...\n";
         next;
@@ -993,7 +989,7 @@ sub purestorage_api_call {
 
   # Use last successful response if we processed multiple arrays
   if ( $all && $success_count > 0 ) {
-    $error = $last_success_error;
+    $error   = $last_success_error;
     $content = $last_success_content;
     print "Debug :: Processed $array_count array(s), $success_count succeeded\n" if $DEBUG >= 2;
   }
@@ -1002,6 +998,7 @@ sub purestorage_api_call {
   # For operations on all arrays (Active Cluster), fail only if all arrays failed
   if ( $error > ERROR_SUCCESS ) {
     if ( $all && $success_count > 0 ) {
+
       # At least one array succeeded, so operation is partially successful
       # This is acceptable for Active Cluster scenarios
       print "Warning :: Operation completed on $success_count of $array_count array(s). Some arrays may have failed.\n";
@@ -1036,15 +1033,18 @@ sub purestorage_http_request {
   my $response;
   my $content;
   my $retry_count = 0;
-  my $max_retries = 1;  # Allow one retry for token refresh
+  my $max_retries = 1;    # Allow one retry for token refresh
 
   # Retry loop for token expiration (max 1 retry)
   while ( $retry_count <= $max_retries ) {
+
     # Obtain token if needed
     if ( $token_state > TOKEN_STATE_LOGIN ) {
       if ( $token_state == TOKEN_STATE_NEEDED ) {
+
         # Check cache first (race condition mitigation)
         unless ( try_cached_token( $config ) ) {
+
           # Request new token
           print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
           ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
@@ -1102,6 +1102,7 @@ sub purestorage_http_request {
   $headers = $response->headers;
   if ( $error == ERROR_SUCCESS ) {
     if ( $token_state == TOKEN_STATE_LOGIN ) {
+
       # Extract tokens from login response
       $config->{ auth_token } = $headers->header( 'x-auth-token' )
         or die "Error :: PureStorage API :: Header 'x-auth-token' is missing.\n";
@@ -1121,8 +1122,9 @@ sub purestorage_http_request {
   if ( $content_type =~ /application\/json/ ) {
     $content = decode_json( $content );
   } else {
+
     # Non-JSON response indicates connectivity/network error
-    $error = $login ? ERROR_AUTH_FAILED : ERROR_NETWORK_ERROR if $error == ERROR_API_ERROR;
+    $error   = $login ? ERROR_AUTH_FAILED : ERROR_NETWORK_ERROR if $error == ERROR_API_ERROR;
     $content = { response => $content };
   }
 
@@ -1311,7 +1313,7 @@ sub purestorage_remove_volume {
   };
 
   my $connections_response = purestorage_api_call( $scfg, $connections_action, 0, $storeid );
-  my @connections = @{ $connections_response->{ items } || [] };
+  my @connections          = @{ $connections_response->{ items } || [] };
 
   if ( @connections ) {
     print "Debug :: Found " . scalar( @connections ) . " connection(s) for volume \"$volname\"\n" if $DEBUG >= 1;
@@ -1556,7 +1558,7 @@ sub filesystem_path {
   my ( $class, $scfg, $volname, $snapname ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::filesystem_path\n" if $DEBUG;
 
-  die "Error :: filesystem_path: snapshot is not implemented ($snapname)\n" if defined($snapname);
+  die "Error :: filesystem_path: snapshot is not implemented ($snapname)\n" if defined( $snapname );
 
   # do we even need this?
   my ( $vtype, undef, $vmid ) = $class->parse_volname( $volname );
@@ -1668,6 +1670,7 @@ sub status {
 
     my $pod = $response->{ items }->[0];
     if ( $pod ) {
+
       # Use quota_limit if set and non-zero, otherwise fall back to array capacity
       # quota_limit = 0 or undef means unlimited (no quota)
       my $quota = $pod->{ quota_limit };
@@ -1680,11 +1683,13 @@ sub status {
       die "Error :: Pod \"$podname\" not found\n";
     }
   } else {
+
     # Get array-wide capacity
     my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' }, 0, $storeid );
 
     my $array = $response->{ items }->[0];
     $total = $array->{ capacity };
+
     # total_physical - physically used space on the array (after deduplication and compression)
     # total_used - logically used space (before deduplication and compression)
     $used = $array->{ space }->{ total_physical };
@@ -1778,14 +1783,14 @@ sub unmap_volume {
 
   # Ensure all data is flushed to disk for write-back cache environments
   print "Debug :: Flushing filesystem and device buffers for $device_path\n" if $DEBUG >= 2;
-  exec_command( [ 'sync' ] );
+  exec_command( ['sync'] );
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
 
   # Wait for udev events to settle, ensuring all async operations complete
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
 
   # Final sync to guarantee write-back cache is flushed
-  exec_command( [ 'sync' ] );
+  exec_command( ['sync'] );
 
   if ( multipath_check( $wwid ) ) {
     print "Debug :: Device \"$wwid\" is a multipath device. Proceeding with multipath removal.\n" if $DEBUG;
