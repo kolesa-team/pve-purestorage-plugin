@@ -8,6 +8,7 @@ use JSON::XS qw( encode_json decode_json );
 
 # Mock PVE::Tools for testing
 BEGIN {
+
   package PVE::Tools;
   use Exporter 'import';
   our @EXPORT_OK = qw( file_get_contents );
@@ -25,7 +26,7 @@ BEGIN {
 # Test token cache implementation
 package main;
 
-my $test_dir = tempdir( CLEANUP => 1 );
+my $test_dir   = tempdir( CLEANUP => 1 );
 my $cache_path = "$test_dir/test_cache.json";
 
 # Helper function to create mock token data
@@ -33,7 +34,7 @@ sub create_token_data {
   my ( $age ) = @_;
   my $now = time();
   return {
-    auth_token => 'test-token-' . int(rand(1000)),
+    auth_token => 'test-token-' . int( rand( 1000 ) ),
     request_id => 'test-request-id',
     created_at => $now - $age,
     ttl        => 3600,
@@ -52,18 +53,18 @@ sub write_test_cache {
 
 # Test 1: Token validation - fresh token
 {
-  my $token_data = create_token_data( 100 );  # 100s old
-  my $ttl = 3600;
-  my $threshold = $ttl * 0.8;  # 2880s
+  my $token_data = create_token_data( 100 );    # 100s old
+  my $ttl        = 3600;
+  my $threshold  = $ttl * 0.8;                  # 2880s
 
   ok( 100 < $threshold, 'Fresh token is valid (age < 80% TTL)' );
 }
 
 # Test 2: Token validation - expired token
 {
-  my $token_data = create_token_data( 3000 );  # 3000s old
-  my $ttl = 3600;
-  my $threshold = $ttl * 0.8;  # 2880s
+  my $token_data = create_token_data( 3000 );    # 3000s old
+  my $ttl        = 3600;
+  my $threshold  = $ttl * 0.8;                   # 2880s
 
   ok( 3000 >= $threshold, 'Expired token needs refresh (age >= 80% TTL)' );
 }
@@ -87,9 +88,9 @@ sub write_test_cache {
   write_test_cache( $token_data );
 
   my $json_text = PVE::Tools::file_get_contents( $cache_path );
-  my $cached = decode_json( $json_text );
+  my $cached    = decode_json( $json_text );
 
-  my $age = time() - $cached->{ created_at };
+  my $age       = time() - $cached->{ created_at };
   my $threshold = 3600 * 0.8;
 
   ok( $age < $threshold, 'Cached token is still valid' );
@@ -101,9 +102,9 @@ sub write_test_cache {
   write_test_cache( $token_data );
 
   my $json_text = PVE::Tools::file_get_contents( $cache_path );
-  my $cached = decode_json( $json_text );
+  my $cached    = decode_json( $json_text );
 
-  my $age = time() - $cached->{ created_at };
+  my $age       = time() - $cached->{ created_at };
   my $threshold = 3600 * 0.8;
 
   ok( $age >= $threshold, 'Cached token is expired and should be refreshed' );
@@ -114,23 +115,21 @@ sub write_test_cache {
   my $old_token = create_token_data( 200 );
   my $new_token = create_token_data( 50 );
 
-  ok( $new_token->{ created_at } > $old_token->{ created_at },
-      'Newer token has later created_at timestamp' );
+  ok( $new_token->{ created_at } > $old_token->{ created_at }, 'Newer token has later created_at timestamp' );
 }
 
 # Test 7: TTL validation
 {
-  my $ttl = 3600;
+  my $ttl               = 3600;
   my $refresh_threshold = $ttl * 0.8;
 
   is( $refresh_threshold, 2880, 'Refresh threshold is 80% of TTL' );
 
   # Test jitter range (±2.5%)
-  my $jitter_min = $ttl * (0.8 - 0.025);
-  my $jitter_max = $ttl * (0.8 + 0.025);
+  my $jitter_min = $ttl * ( 0.8 - 0.025 );
+  my $jitter_max = $ttl * ( 0.8 + 0.025 );
 
-  ok( $jitter_min < $refresh_threshold && $refresh_threshold < $jitter_max,
-      'Jitter keeps threshold within ±2.5% of 80% TTL' );
+  ok( $jitter_min < $refresh_threshold && $refresh_threshold < $jitter_max, 'Jitter keeps threshold within ±2.5% of 80% TTL' );
 }
 
 # Test 8: Multiple token files
@@ -154,17 +153,16 @@ sub write_test_cache {
 
 # Test 9: Token cache path generation
 {
-  my $storeid = 'pure-n1';
-  my $array_index = 0;
+  my $storeid       = 'pure-n1';
+  my $array_index   = 0;
   my $expected_path = "/etc/pve/priv/purestorage/${storeid}_array${array_index}.json";
 
-  like( $expected_path, qr/\/etc\/pve\/priv\/purestorage\/pure-n1_array0\.json$/,
-        'Cache path follows expected format' );
+  like( $expected_path, qr/\/etc\/pve\/priv\/purestorage\/pure-n1_array0\.json$/, 'Cache path follows expected format' );
 }
 
 # Test 10: Atomic write simulation
 {
-  my $temp_path = "$cache_path.tmp.$$";
+  my $temp_path  = "$cache_path.tmp.$$";
   my $token_data = create_token_data( 75 );
 
   # Write to temp file
@@ -182,8 +180,8 @@ sub write_test_cache {
 
 # Test 11: Concurrent token creation scenario
 {
-  my $node_a_token = create_token_data( 0 );  # Fresh token
-  my $node_b_token = create_token_data( 0 );  # Another fresh token
+  my $node_a_token = create_token_data( 0 );    # Fresh token
+  my $node_b_token = create_token_data( 0 );    # Another fresh token
 
   # Both tokens created ~same time
   my $time_diff = abs( $node_a_token->{ created_at } - $node_b_token->{ created_at } );
