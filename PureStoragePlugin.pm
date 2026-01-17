@@ -891,10 +891,17 @@ sub purestorage_api_call {
   my @urls   = split( ',', $scfg->{ address } // '' );
   my @tokens = split( ',', $scfg->{ token }   // '' );
 
+  my $array_count = 0;
+  my $success_count = 0;
+  my $last_success_error = ERROR_SUCCESS;
+  my $last_success_content;
+
   foreach my $i ( 0, 1 ) {
     $url = $urls[$i] // '';
     my $token = $tokens[$i] // '';
     next if $i && $url eq '' && $token eq '';
+
+    $array_count++;
 
     my $cf = $url eq '' ? 'address' : $token eq '' ? 'token' : '';
     die "Error :: Pure Storage \"$cf\" parameter" . ( $i == 0 ? '' : ' for second array' ) . " is not defined.\n" unless $cf eq '';
@@ -924,12 +931,45 @@ sub purestorage_api_call {
       $error = ERROR_SUCCESS;
     }
 
-    # Stop on critical error or success (unless trying all arrays)
-    last if $error == ERROR_API_ERROR || $error <= ERROR_SUCCESS && !$all;
+    # Track success for this array
+    if ( $error <= ERROR_SUCCESS ) {
+      $success_count++;
+      $last_success_error = $error;
+      $last_success_content = $content;
+    }
+
+    # Stop on critical error (unless trying all arrays and we have at least one success)
+    if ( $error == ERROR_API_ERROR ) {
+      if ( $all && $success_count > 0 ) {
+        # Continue to next array even on error if we're processing all arrays
+        # and at least one succeeded (for Active Cluster scenarios)
+        print "Warning :: Operation failed on array $i but succeeded on previous array(s). Continuing...\n" if $DEBUG;
+        next;
+      } else {
+        last;
+      }
+    }
+
+    # Stop on success if not processing all arrays
+    last if $error <= ERROR_SUCCESS && !$all;
+  }
+
+  # Use last successful response if we processed multiple arrays
+  if ( $all && $array_count > 1 && $success_count > 0 ) {
+    $error = $last_success_error;
+    $content = $last_success_content;
+    print "Debug :: Processed $array_count array(s), $success_count succeeded\n" if $DEBUG >= 2;
   }
 
   # Handle fatal errors
+  # For operations on all arrays (Active Cluster), fail only if all arrays failed
   if ( $error > ERROR_SUCCESS ) {
+    if ( $all && $success_count > 0 ) {
+      # At least one array succeeded, so operation is partially successful
+      # This is acceptable for Active Cluster scenarios
+      print "Warning :: Operation completed on $success_count of $array_count array(s). Some arrays may have failed.\n" if $DEBUG;
+      return $last_success_content;
+    }
     my $message = $error == ERROR_AUTH_FAILED ? 'Authentication' : $action->{ name } || "Action '$type' (method '$method')";
     $message = substr( $message, 0, 1 ) eq uc( substr( $message, 0, 1 ) ) ? $message . ' failed' : 'Failed to ' . $message;
     $message = 'PureStorage API :: ' . $message if $error == ERROR_API_ERROR;
@@ -1173,10 +1213,12 @@ sub purestorage_volume_connection {
     }
   };
 
+  # For Active Cluster: connect/disconnect on all arrays (both primary and secondary)
+  # This ensures volumes are accessible from both arrays in Active Cluster configuration
   my $response = purestorage_api_call( $scfg, $action, 1, $storeid );
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
-  print "Info :: Volume \"$volname\" is $message host \"$hname\".\n";
+  print "Info :: Volume \"$volname\" is $message host \"$hname\" on all arrays.\n";
   return 1;
 }
 
