@@ -52,7 +52,23 @@ my $purestorage_wwn_prefix = '3624a9370';
 my $default_hgsuffix       = "";
 my $default_protocol       = 'iscsi';
 
-my $DEBUG = 1;
+# Global debug level (can be overridden per-storage or via environment)
+my $DEBUG = $ENV{ PURESTORAGE_DEBUG } // 0;
+
+# Get effective debug level for a storage config
+sub get_debug_level {
+  my ( $scfg ) = @_;
+  return $scfg->{ debug } if defined $scfg && defined $scfg->{ debug };
+  return $DEBUG;
+}
+
+# Set debug level from storage config (updates global $DEBUG)
+sub set_debug_from_config {
+  my ( $scfg ) = @_;
+  if ( defined $scfg && defined $scfg->{ debug } ) {
+    $DEBUG = $scfg->{ debug };
+  }
+}
 
 ### BLOCK: Configuration
 sub api {
@@ -136,6 +152,13 @@ sub properties {
       type        => 'integer',
       default     => 3600  # Max 10h
     },
+    debug => {
+      description => "Enable debug logging (0=off, 1=basic, 2=verbose, 3=trace).",
+      type        => 'integer',
+      minimum     => 0,
+      maximum     => 3,
+      default     => 0
+    },
   };
 }
 
@@ -151,6 +174,7 @@ sub options {
     check_ssl => { optional => 1 },
     protocol  => { optional => 1 },
     token_ttl => { optional => 1 },
+    debug     => { optional => 1 },
     nodes     => { optional => 1 },
     disable   => { optional => 1 },
     content   => { optional => 1 },
@@ -1498,6 +1522,7 @@ sub free_image {
 
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
+  set_debug_from_config( $scfg );
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::list_images\n" if $DEBUG;
 
   return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
@@ -1528,6 +1553,7 @@ sub status {
 
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
+  set_debug_from_config( $scfg );
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_storage\n" if $DEBUG;
 
   return 1;
