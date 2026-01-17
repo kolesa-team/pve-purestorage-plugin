@@ -5,6 +5,7 @@ debian/libpve-storage-purestorage-perl
 debian/files
 debian/package
 debian/tmp
+tests/test_result.txt
 /*.buildinfo
 /*.deb
 *.log

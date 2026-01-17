@@ -191,7 +191,9 @@ my $cmd = {
   multipathd => '/sbin/multipathd',
   blockdev   => '/usr/sbin/blockdev',
   dmsetup    => '/sbin/dmsetup',
-  kpartx     => '/sbin/kpartx'
+  kpartx     => '/sbin/kpartx',
+  udevadm    => '/usr/bin/udevadm',
+  sync       => '/usr/bin/sync'
 };
 
 # Get full path for a command, checking availability
@@ -1250,6 +1252,7 @@ sub purestorage_remove_volume {
       name   => 'eradicate volume',
       type   => 'volumes',
       method => 'DELETE',
+      ignore => 'Eradication is disabled.',
       params => $params,
     };
 
@@ -1404,7 +1407,7 @@ sub purestorage_snap_volume_delete {
     name   => 'eradicate volume snapshot',
     type   => 'volume-snapshots',
     method => 'DELETE',
-    ignore => 'No such volume or snapshot.',
+    ignore => [ 'No such volume or snapshot.', 'Eradication is disabled.' ],
     params => $params,
     body   => { replication_snapshot => \1 }
   };
@@ -1537,9 +1540,9 @@ sub status {
   # Get storage capacity and used space from the response
   my $array = $response->{ items }->[0];
   my $total = $array->{ capacity };
+  # total_physical - physically used space on the array (after deduplication and compression)
+  # total_used - logically used space (before deduplication and compression)
   my $used  = $array->{ space }->{ total_physical };
-
-  # my $used = $array->{ space }->{ total_used }; # Do not know what is correct
 
   # Calculate free space
   my $free = $total - $used;
@@ -1627,13 +1630,16 @@ sub unmap_volume {
 
   my ( $device_path, @slaves ) = block_device_slaves( $path );
 
+  # Ensure all data is flushed to disk for write-back cache environments
+  print "Debug :: Flushing filesystem and device buffers for $device_path\n" if $DEBUG >= 2;
+  exec_command( [ 'sync' ] );
   exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
 
-  # this may help if there is a write-back cache (see issue #47)
-  ## my $fuser = sub {
-  ##   return exec_command( [ 'fuser', '-s', $device_path ], -1 );
-  ## };
-  ## wait_for( $fuser, 'device cache flush', 30, 0.5 );
+  # Wait for udev events to settle, ensuring all async operations complete
+  eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
+
+  # Final sync to guarantee write-back cache is flushed
+  exec_command( [ 'sync' ] );
 
   if ( multipath_check( $wwid ) ) {
     print "Debug :: Device \"$wwid\" is a multipath device. Proceeding with multipath removal.\n" if $DEBUG;
