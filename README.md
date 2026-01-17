@@ -164,7 +164,7 @@ purestorage: <storage_id>
 | protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (`iscsi`, `fc`). |
 | check_ssl | (`optional`, default is `no`) Verify the server's TLS certificate. Set to `yes` to enable SSL certificate verification. |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
-| debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Can also be set via `PURESTORAGE_DEBUG` environment variable. |
+| debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Environment variable `PURESTORAGE_DEBUG` can be used as fallback when `debug` is not set in config. |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
 
@@ -199,17 +199,19 @@ If you encounter issues while using the plugin, consider the following steps:
 
 Enable debug logging to diagnose issues:
 
-**Temporary (for single command):**
-
-```bash
-PURESTORAGE_DEBUG=1 pvesm list <storage_id>
-```
-
 **Persistent (via configuration):**
 
 ```bash
 pvesm set <storage_id> --debug 1
 ```
+
+**Temporary (for single command, when debug is not set in config):**
+
+```bash
+PURESTORAGE_DEBUG=1 pvesm list <storage_id>
+```
+
+> **Note:** If `debug` is set in storage configuration, it takes priority over `PURESTORAGE_DEBUG` environment variable.
 
 Debug levels:
 
