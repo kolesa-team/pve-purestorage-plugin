@@ -4,10 +4,6 @@ run-name: Tests - ${{ github.ref_name }}
 on:
   workflow_call:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   test:
     name: Run tests
