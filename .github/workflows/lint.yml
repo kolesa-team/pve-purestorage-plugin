@@ -57,20 +57,33 @@ jobs:
           echo "No Perl files to check"
           exit 0
         fi
+        if [ ! -f ".perltidyrc" ]; then
+          echo "Warning: .perltidyrc not found, using default perltidy settings"
+        fi
         for file in $changed_files; do
           if [[ -n "$file" ]] && ([[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]); then
             echo "Checking formatting: $file"
             if command -v perltidy >/dev/null 2>&1; then
               formatted_file="${file}.formatted"
-              perltidy -pro=.perltidyrc "$file" -o "$formatted_file" 2>/dev/null || true
+              if [ -f ".perltidyrc" ]; then
+                perltidy -pro=.perltidyrc "$file" -o "$formatted_file" 2>&1 || true
+              else
+                perltidy "$file" -o "$formatted_file" 2>&1 || true
+              fi
               if [ -f "$formatted_file" ]; then
                 if ! diff -q "$file" "$formatted_file" >/dev/null 2>&1; then
-                  echo "::error file=$file::File is not properly formatted. Run 'perltidy $file' to fix."
+                  echo "::error file=$file::File is not properly formatted. Run 'perltidy -pro=.perltidyrc $file' to fix."
+                  echo "Differences:"
+                  diff "$file" "$formatted_file" | head -20 || true
                   rm -f "$formatted_file"
                   exit 1
                 fi
                 rm -f "$formatted_file"
+              else
+                echo "Warning: perltidy failed to create formatted file for $file"
               fi
+            else
+              echo "Warning: perltidy not found, skipping formatting check"
             fi
           fi
         done
