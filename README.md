@@ -158,6 +158,7 @@ purestorage: <storage_id>
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
 | protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, fc) |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
+| debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Can also be set via `PURESTORAGE_DEBUG` environment variable. |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
 
@@ -175,11 +176,45 @@ purestorage: pure
 
 If you encounter issues while using the plugin, consider the following steps:
 
-- Check Service Status: Ensure that the Proxmox VE services are running correctly. You can restart the services if necessary:
+### Debug Logging
+
+Enable debug logging to diagnose issues:
+
+**Temporary (for single command):**
+```bash
+PURESTORAGE_DEBUG=1 pvesm list <storage_id>
+```
+
+**Persistent (via configuration):**
+```bash
+pvesm set <storage_id> --debug 1
+```
+
+Debug levels:
+- `0` - Off (production, default)
+- `1` - Basic (token operations, main function calls)
+- `2` - Verbose (HTTP requests, token validation details)
+- `3` - Trace (all internal operations)
+
+**Example debug output:**
+```bash
+PURESTORAGE_DEBUG=1 pvesm list pure-n1
+Debug :: activate_storage (pure-n1)
+Debug :: list_images (pure-n1, vmid=all)
+Debug :: Read token cache from: /etc/pve/priv/purestorage/pure-n1_array0.json
+Debug :: Token is valid (age: 125s)
+Debug :: Using cached token from file (age: 125s)
+```
+
+### Service Status
+
+Ensure that the Proxmox VE services are running correctly. You can restart the services if necessary:
 
 ```bash
 sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 ```
+
+### Network and Storage
 
 - Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach the Pure Storage array over the network. Check for firewall rules or network issues that might be blocking communication.
 - Review Logs: Check the Proxmox VE logs for any error messages related to storage or the plugin. Logs are typically found in /var/log/pve.
