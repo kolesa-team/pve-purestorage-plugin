@@ -4,7 +4,7 @@ use strict;
 use warnings;
 use Test::More tests => 15;
 use File::Temp qw( tempdir );
-use JSON::XS qw( encode_json decode_json );
+use JSON::XS   qw( encode_json decode_json );
 
 # Mock PVE::Tools for testing
 BEGIN {
