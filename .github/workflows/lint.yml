@@ -40,7 +40,10 @@ jobs:
       uses: shogo82148/actions-setup-perl@v1
       with:
         perl-version: '5.34'
-        install-cpanm: true
+
+    - name: Install cpanm
+      run: |
+        curl -L https://cpanmin.us | perl - App::cpanminus
 
     - name: Install linting tools
       run: |
