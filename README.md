@@ -12,11 +12,13 @@ disks, providing high performance and reliability.
 - [Features](#features)
 - [Prerequisites](#prerequisites)
   - [Multipath Configuration](#multipath-configuration)
+  - [iSCSI Configuration](#iscsi-configuration)
 - [Installation](#installation)
   - [Manual](#manual)
   - [APT](#apt)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
+  - [Known issues](#known-issues)
 - [Contributing](#contributing)
 
 ## Features
@@ -101,8 +103,8 @@ sudo iscsiadm -m node --op update -n node.startup -v automatic
 ```
 
 > [!CAUTION]
-> As long as there are no hostX entries in /sys/class/iscsi_host/ the plugin
-> is not ready to be used.
+> As long as there are no hostX entries in /sys/class/iscsi_host/ the
+> plugin is not ready to be used.
 
 ## Installation
 
@@ -150,7 +152,8 @@ via the GUI, you will need to open shell and use `pvesm` command to add it:
 ```bash
 pvesm add purestorage <storage_id> \
    --nodes <proxmox_node_list> \
-   --address https://<purestorage_fqdn_or_ip> \
+   --address \
+   https://<purestorage_fqdn_or_ip> \
    --token <purestorage_api_token> \
    --vgname <purestorage_volume_group_name> \
    --hgsuffix <purestorage_host_suffix>
@@ -301,7 +304,8 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 cat /etc/lvm/lvmlocal.conf
 ...
 devices {
-  global_filter=["r|/dev/zd.*|","r|/dev/rbd.*|","r|/dev/mapper/3624a9370.*|"]
+  global_filter=["r|/dev/zd.*|","r|/dev/rbd.*|",
+                 "r|/dev/mapper/3624a9370.*|"]
 }
 ```
 
