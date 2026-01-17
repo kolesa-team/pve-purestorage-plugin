@@ -6,7 +6,6 @@ use warnings;
 use Data::Dumper qw( Dumper );    # DEBUG
 
 use IO::File   ();
-use Net::IP    ();
 use File::Path ();
 
 use PVE::JSONSchema      ();
@@ -1620,9 +1619,9 @@ sub status {
     my $pod = $response->{ items }->[0];
     if ( $pod ) {
       # Use quota_limit if set, otherwise fall back to array capacity
-      $total = $pod->{ quota_limit } || $pod->{ capacity };
+      $total = defined( $pod->{ quota_limit } ) ? $pod->{ quota_limit } : $pod->{ capacity };
       $used  = $pod->{ space }->{ total_physical };
-      print "Debug :: Pod quota_limit: " . ( $pod->{ quota_limit } || 'not set' ) . "\n" if $DEBUG >= 2;
+      print "Debug :: Pod quota_limit: " . ( defined( $pod->{ quota_limit } ) ? $pod->{ quota_limit } : 'not set' ) . "\n" if $DEBUG >= 2;
     } else {
       die "Error :: Pod \"$podname\" not found\n";
     }
