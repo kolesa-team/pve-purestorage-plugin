@@ -14,10 +14,13 @@ disks, providing high performance and reliability.
   - [Multipath Configuration](#multipath-configuration)
   - [iSCSI Configuration](#iscsi-configuration)
 - [Installation](#installation)
-  - [Manual](#manual)
-  - [APT](#apt)
+  - [Manual Installation](#manual-installation)
+  - [Debian Package Installation (Recommended)](#debian-package-installation-recommended)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
+  - [Debug Logging](#debug-logging)
+  - [Service Status](#service-status)
+  - [Diagnostic Commands](#diagnostic-commands)
   - [Known issues](#known-issues)
 - [Contributing](#contributing)
 
@@ -93,7 +96,7 @@ blacklist_exceptions {
 }
 ```
 
-## iSCSI Configuration
+### iSCSI Configuration
 
 Initiate iSCSI according to the Proxmox Guidelines.
 
@@ -108,35 +111,106 @@ sudo iscsiadm -m node --op update -n node.startup -v automatic
 
 ## Installation
 
-There are two methods to install the plugin: manual installation and APT
-package installation.
+There are two methods to install the plugin: manual installation and Debian
+package installation via APT.
 
-### Manual
+> [!IMPORTANT]
+> If you are using a cluster setup, install the plugin on all nodes in the
+> cluster. The storage configuration will be automatically synchronized via
+> corosync, but the plugin code must be present on each node.
 
-To manually install the plugin, follow these steps:
+### Manual Installation
+
+Manual installation is useful for development or when you want to install
+from source.
+
+#### Step 1: Install required dependencies
 
 ```bash
-# Clone repository
-git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
-# Navigate to the Plugin Directory
-cd pve-purestorage-plugin
-# Create the custom plugin directory if it does not already exist
-mkdir /usr/share/perl5/PVE/Storage/Custom
-# Copy plugin to custom plugin directory
-cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
-# Restart Proxmox VE
-systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
+sudo apt-get update
+sudo apt-get install -y \
+  libwww-perl \
+  libjson-perl \
+  libjson-xs-perl
 ```
 
-### APT
-
-**Note**: Replace `<PACKAGE_VERSION>` with your desired version number
-(e.g., `0.0.1`).
+#### Step 2: Clone the repository
 
 ```bash
-PACKAGE_VERSION="<PACKAGE_VERSION>" curl -L -o libpve-storage-purestorage-perl.deb "https://github.com/kolesa-team/pve-purestorage-plugin/releases/download/v$PACKAGE_VERSION/libpve-storage-purestorage-perl_$PACKAGE_VERSION-1_all.deb"
+git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
+cd pve-purestorage-plugin
+```
 
-sudo apt install ./libpve-storage-purestorage-perl.deb
+#### Step 3: Install the plugin
+
+```bash
+# Create the custom plugin directory
+sudo mkdir -p /usr/share/perl5/PVE/Storage/Custom
+
+# Copy plugin file
+sudo cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
+
+# Set correct permissions
+sudo chmod 644 /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
+```
+
+#### Step 4: Restart Proxmox VE services
+
+```bash
+sudo systemctl restart pvedaemon.service pveproxy.service
+```
+
+#### Step 5: Verify installation
+
+```bash
+pvesm status
+# The purestorage type should now be available
+```
+
+### Debian Package Installation (Recommended)
+
+Installing via Debian package is the recommended method as it handles
+dependencies automatically and provides easy updates.
+
+#### Step 1: Download the package*
+
+Replace `<PACKAGE_VERSION>` with the desired version (e.g., `0.0.1`). Check
+the [releases page](https://github.com/kolesa-team/pve-purestorage-plugin/releases)
+for available versions.
+
+```bash
+PACKAGE_VERSION="<PACKAGE_VERSION>"
+wget "https://github.com/kolesa-team/pve-purestorage-plugin/releases/download/v${PACKAGE_VERSION}/libpve-storage-purestorage-perl_${PACKAGE_VERSION}-1_all.deb"
+```
+
+#### Step 2: Install the package
+
+```bash
+sudo apt install ./libpve-storage-purestorage-perl_${PACKAGE_VERSION}-1_all.deb
+```
+
+#### Step 3: Verify installation
+
+```bash
+dpkg -l | grep libpve-storage-purestorage-perl
+# Should show the installed package version
+```
+
+#### To upgrade to a newer version
+
+```bash
+# Download new version
+PACKAGE_VERSION="<NEW_VERSION>"
+wget "https://github.com/kolesa-team/pve-purestorage-plugin/releases/download/v${PACKAGE_VERSION}/libpve-storage-purestorage-perl_${PACKAGE_VERSION}-1_all.deb"
+
+# Upgrade
+sudo apt install ./libpve-storage-purestorage-perl_${PACKAGE_VERSION}-1_all.deb
+```
+
+#### To uninstall
+
+```bash
+sudo apt remove libpve-storage-purestorage-perl
 ```
 
 ## Configuration
@@ -229,15 +303,18 @@ steps:
 
 ### Debug Logging
 
-Enable debug logging to diagnose issues:
+The plugin provides detailed debug logging to help diagnose issues. Debug
+output is written to syslog and can be viewed in Proxmox logs.
 
-**Persistent (via configuration):**
+**Enable debug logging:**
+
+Persistent (via configuration):
 
 ```bash
 pvesm set <storage_id> --debug 1
 ```
 
-**Temporary (for single command, when debug is not set in config):**
+Temporary (for single command, when debug is not set in config):
 
 ```bash
 PURESTORAGE_DEBUG=1 pvesm list <storage_id>
@@ -246,12 +323,12 @@ PURESTORAGE_DEBUG=1 pvesm list <storage_id>
 > **Note:** If `debug` is set in storage configuration, it takes priority
 > over `PURESTORAGE_DEBUG` environment variable.
 
-Debug levels:
+**Debug levels:**
 
 - `0` - Off (production, default)
-- `1` - Basic (token operations, main function calls)
-- `2` - Verbose (HTTP requests, token validation details)
-- `3` - Trace (all internal operations)
+- `1` - Basic (token operations, main function calls, volume operations)
+- `2` - Verbose (HTTP requests, token validation, API responses)
+- `3` - Trace (all internal operations, detailed flow)
 
 **Example debug output:**
 
@@ -264,6 +341,47 @@ Debug :: Token is valid (age: 125s)
 Debug :: Using cached token from file (age: 125s)
 ```
 
+**Common debug scenarios:**
+
+Debug volume creation:
+
+```bash
+PURESTORAGE_DEBUG=2 pvesm alloc <storage_id> <vmid> <volname> 10G
+```
+
+Debug volume deletion:
+
+```bash
+PURESTORAGE_DEBUG=2 pvesm free <storage_id>:<volname>
+```
+
+Debug API authentication issues:
+
+```bash
+PURESTORAGE_DEBUG=3 pvesm status <storage_id>
+```
+
+**View debug logs:**
+
+Check Proxmox daemon logs:
+
+```bash
+journalctl -u pvedaemon -f
+```
+
+Filter for PureStorage plugin messages:
+
+```bash
+journalctl -u pvedaemon | grep -E "(Debug ::|Info ::|Warning ::|Error ::)"
+```
+
+Check token cache status:
+
+```bash
+ls -lah /etc/pve/priv/purestorage/
+cat /etc/pve/priv/purestorage/<storage_id>_array0.json | jq .
+```
+
 ### Service Status
 
 Ensure that the Proxmox VE services are running correctly. You can restart
@@ -273,33 +391,195 @@ the services if necessary:
 sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 ```
 
-### Network and Storage
+### Diagnostic Commands
 
-- Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach
-  the Pure Storage array over the network. Check for firewall rules or
-  network issues that might be blocking communication.
-- Review Logs: Check the Proxmox VE logs for any error messages related to
-  storage or the plugin. Logs are typically found in /var/log/pve. These
-  commands are helpful for troubleshooting:
+**Multipath diagnostics:**
 
-  ```bash
-  multipath -ll -v3 #diagnose issues with the multipath service
-  iscsiadm -m node #list what iscsi nodes are mounted
-  ls -l /dev/mapper/3624a9370* #list wwids of Pure mapped devices on the system
-  ```
+List all multipath devices with details:
 
-- Multipath Configuration: Verify that your multipath.conf is correctly
-  configured and that multipath devices are recognized. Use multipath -ll
-  to list the current multipath devices.
-- API Token Permissions: Ensure that the API token used has the necessary
-  permissions to create and manage volumes on the Pure Storage array.
-- Plugin Updates: Ensure you are using the latest version of the plugin.
-  Check the GitHub repository for updates.
+```bash
+multipath -ll
+```
+
+Verbose multipath debugging:
+
+```bash
+multipath -ll -v3
+```
+
+Show only Pure Storage devices:
+
+```bash
+multipath -ll | grep -A 10 "3624a9370"
+```
+
+Reload multipath configuration:
+
+```bash
+systemctl reload multipathd
+```
+
+**iSCSI diagnostics:**
+
+List all iSCSI sessions:
+
+```bash
+iscsiadm -m session
+```
+
+Show detailed session information:
+
+```bash
+iscsiadm -m session -P 3
+```
+
+List all discovered targets:
+
+```bash
+iscsiadm -m node
+```
+
+Rescan iSCSI sessions:
+
+```bash
+iscsiadm -m session --rescan
+```
+
+**PureStorage volume diagnostics:**
+
+List all Pure Storage mapped devices:
+
+```bash
+ls -l /dev/mapper/3624a9370*
+```
+
+Show device information:
+
+```bash
+lsblk | grep "3624a9370"
+```
+
+Check device WWIDs:
+
+```bash
+/lib/udev/scsi_id --whitelisted --device=/dev/mapper/3624a9370<wwid>
+```
+
+Show device mapper table:
+
+```bash
+dmsetup table
+```
+
+Show device mapper dependencies:
+
+```bash
+dmsetup deps -o devname
+```
+
+List all device mapper devices:
+
+```bash
+dmsetup ls --tree
+```
+
+Show detailed info for specific device:
+
+```bash
+dmsetup info /dev/mapper/3624a9370<wwid>
+```
+
+**Partition management (kpartx):**
+
+List partitions on a device:
+
+```bash
+kpartx -l /dev/mapper/3624a9370<wwid>
+```
+
+Add partition mappings:
+
+```bash
+kpartx -a /dev/mapper/3624a9370<wwid>
+```
+
+Remove partition mappings:
+
+```bash
+kpartx -d /dev/mapper/3624a9370<wwid>
+```
+
+Sync partition table:
+
+```bash
+kpartx -u /dev/mapper/3624a9370<wwid>
+```
+
+**Storage plugin diagnostics:**
+
+List all volumes on storage:
+
+```bash
+pvesm list <storage_id>
+```
+
+Show storage status:
+
+```bash
+pvesm status <storage_id>
+```
+
+Scan for new volumes:
+
+```bash
+pvesm scan <storage_id>
+```
+
+Test volume allocation (dry-run):
+
+```bash
+pvesm alloc <storage_id> <vmid> test-volume 1G
+pvesm free <storage_id>:test-volume
+```
+
+**Network connectivity:**
+
+Test API endpoint connectivity:
+
+```bash
+curl -k https://<array_address>/api/2.30/arrays
+```
+
+Test with API token:
+
+```bash
+curl -k -X POST https://<array_address>/api/2.30/login \
+  -H "Content-Type: application/json" \
+  -d '{"api_token":"<your_token>"}'
+```
+
+Check iSCSI portal connectivity:
+
+```bash
+nc -zv <array_iscsi_ip> 3260
+```
+
+**Common issues:**
+
+- **API Token Permissions**: Ensure the API token has sufficient permissions
+  to create and manage volumes on the Pure Storage array
+- **Multipath Configuration**: Verify multipath.conf is correctly configured
+  and multipath devices are recognized
+- **Network Connectivity**: Check firewall rules and network routes to Pure
+  Storage array
+- **Plugin Updates**: Ensure you are using the latest version of the plugin
 
 ### Known issues
 
-- `lvm inside a volume`: If you plan to use LVM inside a volume, it is
-  better to add purestorage volumes to the ignore list to avoid scanning.
+**LVM inside a volume:**
+
+If you plan to use LVM inside a volume, it is better to add purestorage
+volumes to the ignore list to avoid scanning.
 
 ```bash
 cat /etc/lvm/lvmlocal.conf
@@ -309,6 +589,41 @@ devices {
                  "r|/dev/mapper/3624a9370.*|"]
 }
 ```
+
+**Debug output contamination ([#56](https://github.com/kolesa-team/pve-purestorage-plugin/issues/56)):**
+
+When debug logging is enabled, debug messages may contaminate command
+outputs that should be clean (e.g., `qm showcmd`, `pvesm path`). This can
+break tools that parse these outputs.
+
+Workaround: Disable debug logging when using commands that need clean output:
+
+```bash
+pvesm set <storage_id> --debug 0
+```
+
+Or use temporary debug only when needed:
+
+```bash
+PURESTORAGE_DEBUG=1 <command>
+```
+
+**Volume auto-mount issues ([#59](https://github.com/kolesa-team/pve-purestorage-plugin/issues/59)):**
+
+The `filesystem_path` function returns device paths that may not work
+reliably when volumes are deactivated. This affects operations like
+`qm showcmd` and backup tools (e.g., Veeam) that need direct access to
+volume paths.
+
+Current behavior: Volumes are activated on-demand and may deactivate when
+not in use.
+
+Workaround: Ensure volumes are activated before accessing them directly.
+For automated workflows, consider implementing volume activation in your
+scripts.
+
+Note: A proper solution using autofs for automatic volume mounting is being
+evaluated.
 
 ## Contributing
 
