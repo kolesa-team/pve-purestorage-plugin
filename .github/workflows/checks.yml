@@ -4,7 +4,6 @@ run-name: Checks on ${{ github.ref_name }} by ${{ github.actor }}
 on:
   push:
 
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
