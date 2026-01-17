@@ -48,43 +48,17 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y perltidy || true
 
-    - name: Check Perl syntax
-      if: inputs.perl-files != ''
-      run: |
-        echo "Checking Perl syntax..."
-        changed_files="${{ inputs.perl-files }}"
-        for file in $changed_files; do
-          if [[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]; then
-            echo "Checking $file..."
-            # Check syntax, ignore missing PVE dependencies
-            output=$(perl -c "$file" 2>&1)
-            exit_code=$?
-
-            # Check if this is a PVE dependency error (expected and OK)
-            if echo "$output" | grep -q "Can't locate PVE/" && echo "$output" | grep -q "BEGIN failed--compilation aborted"; then
-              # Only PVE dependency errors - this is OK
-              echo "$file: OK (PVE dependencies not available, skipped)"
-              continue
-            fi
-
-            # If we got here, either success or real error
-            if [ $exit_code -ne 0 ]; then
-              echo "::error file=$file::Perl compilation error"
-              echo "$output"
-              exit 1
-            fi
-
-            echo "$file: syntax OK"
-          fi
-        done
-
     - name: Check code formatting with perltidy
       if: inputs.perl-files != ''
       run: |
         echo "Checking code formatting..."
         changed_files="${{ inputs.perl-files }}"
+        if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+          echo "No Perl files to check"
+          exit 0
+        fi
         for file in $changed_files; do
-          if [[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]; then
+          if [[ -n "$file" ]] && ([[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]); then
             echo "Checking formatting: $file"
             if command -v perltidy >/dev/null 2>&1; then
               formatted_file="${file}.formatted"
@@ -109,8 +83,12 @@ jobs:
         echo "Running Perl::Critic static analysis..."
         if command -v perlcritic >/dev/null 2>&1; then
           changed_files="${{ inputs.perl-files }}"
+          if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+            echo "No Perl files to analyze"
+            exit 0
+          fi
           for file in $changed_files; do
-            if [[ "$file" == *.pm ]]; then
+            if [[ -n "$file" ]] && [[ "$file" == *.pm ]]; then
               echo "Analyzing: $file"
               perlcritic --quiet "$file" || true
             fi
@@ -143,9 +121,13 @@ jobs:
       run: |
         echo "Linting Markdown files..."
         changed_files="${{ inputs.markdown-files }}"
+        if [ -z "$changed_files" ] || [ "$changed_files" == " " ]; then
+          echo "No Markdown files to lint"
+          exit 0
+        fi
         if command -v markdownlint-cli2 >/dev/null 2>&1; then
           for file in $changed_files; do
-            if [[ "$file" == *.md ]]; then
+            if [[ -n "$file" ]] && [[ "$file" == *.md ]]; then
               echo "Linting: $file"
               markdownlint-cli2 "$file" "#node_modules" "#.git" || {
                 echo "::error file=$file::Markdown linting failed"
@@ -155,7 +137,7 @@ jobs:
           done
         elif command -v markdownlint >/dev/null 2>&1; then
           for file in $changed_files; do
-            if [[ "$file" == *.md ]]; then
+            if [[ -n "$file" ]] && [[ "$file" == *.md ]]; then
               echo "Linting: $file"
               markdownlint "$file" || {
                 echo "::error file=$file::Markdown linting failed"

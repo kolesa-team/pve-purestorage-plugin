@@ -3,6 +3,15 @@ run-name: Checks on ${{ github.ref_name }} by ${{ github.actor }}
 
 on:
   push:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      check_all_files:
+        description: 'Check all files (not just changed)'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -13,16 +22,28 @@ jobs:
     name: Check changed files
     runs-on: ubuntu-22.04
     outputs:
+      check-all: ${{ steps.set-check-all.outputs.check-all }}
       perl-changed: ${{ steps.changed-files-perl.outputs.any_changed }}
       markdown-changed: ${{ steps.changed-files-markdown.outputs.any_changed }}
       test-changed: ${{ steps.changed-files-test.outputs.any_changed }}
-      perl-files: ${{ steps.changed-files-perl.outputs.all_changed_files }}
-      markdown-files: ${{ steps.changed-files-markdown.outputs.all_changed_files }}
+      perl-files: ${{ steps.set-perl-files.outputs.files }}
+      markdown-files: ${{ steps.set-markdown-files.outputs.files }}
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+
+    - name: Determine if we should check all files
+      id: set-check-all
+      run: |
+        # Check all files for pull requests or manual workflow dispatch with check_all_files=true
+        if [ "${{ github.event_name }}" == "pull_request" ] || \
+           ([ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.check_all_files }}" == "true" ]); then
+          echo "check-all=true" >> $GITHUB_OUTPUT
+        else
+          echo "check-all=false" >> $GITHUB_OUTPUT
+        fi
 
     - name: Check changed Perl files
       id: changed-files-perl
@@ -47,19 +68,45 @@ jobs:
           tests/**/*.t
           tests/**/*.pl
 
+    - name: Set Perl files to check
+      id: set-perl-files
+      run: |
+        if [ "${{ steps.set-check-all.outputs.check-all }}" == "true" ]; then
+          files=$(find . -type f \( -name "*.pm" -o -name "*.pl" \) ! -path "*/node_modules/*" ! -path "*/.git/*" | tr '\n' ' ')
+          echo "files=$files" >> $GITHUB_OUTPUT
+        else
+          echo "files=${{ steps.changed-files-perl.outputs.all_changed_files }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Set Markdown files to check
+      id: set-markdown-files
+      run: |
+        if [ "${{ steps.set-check-all.outputs.check-all }}" == "true" ]; then
+          files=$(find . -type f -name "*.md" ! -path "*/node_modules/*" ! -path "*/.git/*" | tr '\n' ' ')
+          echo "files=$files" >> $GITHUB_OUTPUT
+        else
+          echo "files=${{ steps.changed-files-markdown.outputs.all_changed_files }}" >> $GITHUB_OUTPUT
+        fi
+
   lint:
     name: Lint
     needs: check-changes
-    if: needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.markdown-changed == 'true'
+    if: |
+      (needs.check-changes.outputs.check-all == 'true') ||
+      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.markdown-changed == 'true') ||
+      github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/lint.yml
     with:
-      enable-perl-lint: ${{ needs.check-changes.outputs.perl-changed == 'true' }}
-      enable-markdown-lint: ${{ needs.check-changes.outputs.markdown-changed == 'true' }}
+      enable-perl-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.perl-changed == 'true' || github.event_name == 'workflow_dispatch' }}
+      enable-markdown-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.markdown-changed == 'true' || github.event_name == 'workflow_dispatch' }}
       perl-files: ${{ needs.check-changes.outputs.perl-files }}
       markdown-files: ${{ needs.check-changes.outputs.markdown-files }}
 
   test:
     name: Tests
     needs: check-changes
-    if: needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.test-changed == 'true'
+    if: |
+      (needs.check-changes.outputs.check-all == 'true') ||
+      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.test-changed == 'true') ||
+      github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/tests.yml

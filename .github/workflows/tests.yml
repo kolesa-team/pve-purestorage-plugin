@@ -24,18 +24,7 @@ jobs:
       run: |
         cpanm --notest Test::More JSON JSON::XS
 
-    - name: Check changed files
-      id: changed-files
-      uses: tj-actions/changed-files@v44
-      with:
-        files: |
-          **/*.pm
-          **/*.pl
-          tests/**/*.t
-          tests/**/*.pl
-
     - name: Run tests
-      if: steps.changed-files.outputs.any_changed == 'true'
       run: |
         chmod +x tests/run_tests.sh
         ./tests/run_tests.sh
