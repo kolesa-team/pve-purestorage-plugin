@@ -774,12 +774,28 @@ sub load_auth_token {
   my $cache_path = defined( $storeid ) ? get_token_cache_path( $storeid, $array_index ) : undef;
   my $ttl = $scfg->{ token_ttl } || 3600;
 
-  # Try file cache first
+  # Try in-memory cache first (fastest, no I/O)
+  my $mem_token_key = '_auth_token' . $array_index;
+  my $mem_request_id_key = '_request_id' . $array_index;
+  if ( defined( $scfg->{ $mem_token_key } ) && $scfg->{ $mem_token_key } ne '' ) {
+    print "Debug :: Using cached token from memory\n" if $DEBUG >= 2;
+    return (
+      $scfg->{ $mem_token_key },
+      $scfg->{ $mem_request_id_key },
+      $cache_path,
+      $ttl
+    );
+  }
+
+  # Try file cache
   if ( $cache_path ) {
     my $cached_token = read_token_cache( $cache_path );
     if ( $cached_token && is_token_valid( $cached_token, $ttl ) ) {
       my $age = time() - $cached_token->{ created_at };
       print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG >= 1;
+      # Update in-memory cache for faster access next time
+      $scfg->{ $mem_token_key } = $cached_token->{ auth_token };
+      $scfg->{ $mem_request_id_key } = $cached_token->{ request_id };
       return (
         $cached_token->{ auth_token },
         $cached_token->{ request_id },
@@ -789,8 +805,7 @@ sub load_auth_token {
     }
   }
 
-  # File cache is expired or missing, do not fallback to in-memory cache
-  # Return undef for auth_token to force new token request
+  # File cache is expired or missing, return undef to force new token request
   return ( undef, undef, $cache_path, $ttl );
 }
 
@@ -857,6 +872,24 @@ sub is_ignorable_error {
   # Check if error message is in ignore list
   my $error_msg = $content->{ errors }->[0]->{ message } // '';
   return grep { $_ eq $error_msg } @$ignore;
+}
+
+sub try_cached_token {
+  my ( $config ) = @_;
+
+  return 0 unless $config->{ cache_path };
+
+  my $cached_token = read_token_cache( $config->{ cache_path } );
+  return 0 unless $cached_token && $cached_token->{ auth_token };
+  return 0 unless is_token_valid( $cached_token, $config->{ ttl } || 3600 );
+
+  my $age = time() - $cached_token->{ created_at };
+  print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG >= 1;
+
+  $config->{ auth_token } = $cached_token->{ auth_token };
+  $config->{ request_id } = $cached_token->{ request_id };
+
+  return 1;
 }
 
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
@@ -936,14 +969,19 @@ sub purestorage_api_call {
       $success_count++;
       $last_success_error = $error;
       $last_success_content = $content;
+      print "Debug :: Array " . ( $i + 1 ) . " ($url) succeeded\n" if $DEBUG >= 2;
     }
 
-    # Stop on critical error (unless trying all arrays and we have at least one success)
+    # Stop on critical authentication error (cannot continue)
+    if ( $error == ERROR_AUTH_FAILED ) {
+      last;
+    }
+
+    # Handle API errors in Active Cluster mode
     if ( $error == ERROR_API_ERROR ) {
       if ( $all && $success_count > 0 ) {
-        # Continue to next array even on error if we're processing all arrays
-        # and at least one succeeded (for Active Cluster scenarios)
-        print "Warning :: Operation failed on array $i but succeeded on previous array(s). Continuing...\n" if $DEBUG;
+        # Continue to next array - partial success acceptable in Active Cluster
+        print "Warning :: Array " . ( $i + 1 ) . " ($url) failed but array(s) succeeded. Continuing...\n";
         next;
       } else {
         last;
@@ -955,7 +993,7 @@ sub purestorage_api_call {
   }
 
   # Use last successful response if we processed multiple arrays
-  if ( $all && $array_count > 1 && $success_count > 0 ) {
+  if ( $all && $success_count > 0 ) {
     $error = $last_success_error;
     $content = $last_success_content;
     print "Debug :: Processed $array_count array(s), $success_count succeeded\n" if $DEBUG >= 2;
@@ -967,7 +1005,7 @@ sub purestorage_api_call {
     if ( $all && $success_count > 0 ) {
       # At least one array succeeded, so operation is partially successful
       # This is acceptable for Active Cluster scenarios
-      print "Warning :: Operation completed on $success_count of $array_count array(s). Some arrays may have failed.\n" if $DEBUG;
+      print "Warning :: Operation completed on $success_count of $array_count array(s). Some arrays may have failed.\n";
       return $last_success_content;
     }
     my $message = $error == ERROR_AUTH_FAILED ? 'Authentication' : $action->{ name } || "Action '$type' (method '$method')";
@@ -1006,28 +1044,21 @@ sub purestorage_http_request {
     # Obtain token if needed
     if ( $token_state > TOKEN_STATE_LOGIN ) {
       if ( $token_state == TOKEN_STATE_NEEDED ) {
-        print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
-        ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
+        # Check cache first (race condition mitigation)
+        unless ( try_cached_token( $config ) ) {
+          # Request new token
+          print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
+          ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
 
-        # Login failed - check if another node cached a valid token
-        if ( $error > ERROR_SUCCESS && $config->{ cache_path } ) {
-          print "Debug :: Login failed, checking if another node cached a token\n" if $DEBUG >= 2;
-          my $cached_token = read_token_cache( $config->{ cache_path } );
-          if ( $cached_token
-               && $cached_token->{ auth_token }
-               && is_token_valid( $cached_token, $config->{ ttl } || 3600 ) ) {
-            print "Debug :: Using cached token from another node after login failure\n" if $DEBUG >= 2;
-            $config->{ auth_token } = $cached_token->{ auth_token };
-            $config->{ request_id } = $cached_token->{ request_id };
-            $token_state = TOKEN_STATE_CACHED;
-            # Continue with cached token instead of failing
-          } else {
-            # No valid cached token available, propagate login error
-            return ( $error, $content );
+          # On failure, try cache again (another node may have succeeded)
+          if ( $error > ERROR_SUCCESS ) {
+            print "Debug :: Login failed, checking if another node cached a token\n" if $DEBUG >= 2;
+            unless ( try_cached_token( $config ) ) {
+              return ( $error, $content );
+            }
           }
-        } elsif ( $error > ERROR_SUCCESS ) {
-          return ( $error, $content );
         }
+        $token_state = TOKEN_STATE_CACHED;
       } else {
         print "Debug :: Using existing session token\n" if $DEBUG >= 2;
       }
@@ -1046,24 +1077,17 @@ sub purestorage_http_request {
       if ( $retry_count <= $max_retries ) {
         print "Debug :: Session token expired (401), retry $retry_count/$max_retries\n" if $DEBUG >= 1;
 
-        # Race condition mitigation: check if another node already refreshed token
-        if ( $config->{ cache_path } ) {
-          my $fresh_token = read_token_cache( $config->{ cache_path } );
-          if ( $fresh_token
-               && $fresh_token->{ auth_token }
-               && $fresh_token->{ auth_token } ne $config->{ auth_token }
-               && is_token_valid( $fresh_token, $config->{ ttl } || 3600 ) ) {
-            # Another node already cached a valid token, use it
-            print "Debug :: Using refreshed token from another node\n" if $DEBUG >= 2;
-            $config->{ auth_token } = $fresh_token->{ auth_token };
-            $config->{ request_id } = $fresh_token->{ request_id };
-            $token_state = TOKEN_STATE_CACHED;
-            next;  # Retry with the new token
-          }
+        # Save current token to detect if cache has newer version
+        my $old_token = $config->{ auth_token };
+
+        # Try cache first - another node may have already refreshed
+        if ( try_cached_token( $config ) && $config->{ auth_token } ne $old_token ) {
+          print "Debug :: Using refreshed token from another node\n" if $DEBUG >= 2;
+          $token_state = TOKEN_STATE_CACHED;
+          next;
         }
 
-        # No valid token from other nodes, request new one
-        print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
+        # No fresh token in cache, request new one
         cleanup_token_cache( $config );
         $token_state = TOKEN_STATE_NEEDED;
         next;
