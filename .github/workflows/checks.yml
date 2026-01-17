@@ -2,9 +2,11 @@ name: Checks
 run-name: Checks on ${{ github.ref_name }} by ${{ github.actor }}
 
 on:
-  push:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types:
+    - opened
+    - synchronize
+    - reopened
   workflow_dispatch:
     inputs:
       check_all_files:
@@ -37,9 +39,9 @@ jobs:
     - name: Determine if we should check all files
       id: set-check-all
       run: |
-        # Check all files for pull requests or manual workflow dispatch with check_all_files=true
-        if [ "${{ github.event_name }}" == "pull_request" ] || \
-           ([ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.check_all_files }}" == "true" ]); then
+        # Check all files only for manual workflow dispatch with check_all_files=true
+        # For PRs, check only changed files
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ "${{ inputs.check_all_files }}" == "true" ]; then
           echo "check-all=true" >> $GITHUB_OUTPUT
         else
           echo "check-all=false" >> $GITHUB_OUTPUT
@@ -93,12 +95,11 @@ jobs:
     needs: check-changes
     if: |
       (needs.check-changes.outputs.check-all == 'true') ||
-      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.markdown-changed == 'true') ||
-      github.event_name == 'workflow_dispatch'
+      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.markdown-changed == 'true')
     uses: ./.github/workflows/lint.yml
     with:
-      enable-perl-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.perl-changed == 'true' || github.event_name == 'workflow_dispatch' }}
-      enable-markdown-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.markdown-changed == 'true' || github.event_name == 'workflow_dispatch' }}
+      enable-perl-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.perl-changed == 'true' }}
+      enable-markdown-lint: ${{ needs.check-changes.outputs.check-all == 'true' || needs.check-changes.outputs.markdown-changed == 'true' }}
       perl-files: ${{ needs.check-changes.outputs.perl-files }}
       markdown-files: ${{ needs.check-changes.outputs.markdown-files }}
 
@@ -107,6 +108,5 @@ jobs:
     needs: check-changes
     if: |
       (needs.check-changes.outputs.check-all == 'true') ||
-      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.test-changed == 'true') ||
-      github.event_name == 'workflow_dispatch'
+      (needs.check-changes.outputs.perl-changed == 'true' || needs.check-changes.outputs.test-changed == 'true')
     uses: ./.github/workflows/tests.yml
