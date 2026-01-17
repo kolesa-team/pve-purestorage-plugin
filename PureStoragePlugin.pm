@@ -1297,7 +1297,44 @@ sub purestorage_remove_volume {
     }
   }
 
-  my $params = { names => purestorage_name( $scfg, $volname ) };
+  # Disconnect volume from all hosts before destroying
+  print "Debug :: Disconnecting volume from all hosts\n" if $DEBUG >= 2;
+  my $pure_volname = purestorage_name( $scfg, $volname );
+  my $connections_action = {
+    name   => 'list volume connections',
+    type   => 'connections',
+    method => 'GET',
+    params => { volume_names => $pure_volname }
+  };
+
+  my $connections_response = purestorage_api_call( $scfg, $connections_action, 0, $storeid );
+  my @connections = @{ $connections_response->{ items } || [] };
+
+  if ( @connections ) {
+    print "Debug :: Found " . scalar( @connections ) . " connection(s) for volume \"$volname\"\n" if $DEBUG >= 1;
+    foreach my $conn ( @connections ) {
+      my $hostname = $conn->{ host }->{ name };
+      print "Debug :: Disconnecting from host \"$hostname\"\n" if $DEBUG >= 2;
+
+      my $disconnect_action = {
+        name   => 'delete volume connection',
+        type   => 'connections',
+        method => 'DELETE',
+        ignore => [ 'Volume has been destroyed.', 'Connection does not exist.' ],
+        params => {
+          host_names   => $hostname,
+          volume_names => $pure_volname
+        }
+      };
+
+      purestorage_api_call( $scfg, $disconnect_action, 1, $storeid );
+    }
+    print "Info :: Volume \"$volname\" disconnected from all hosts.\n";
+  } else {
+    print "Debug :: No connections found for volume \"$volname\"\n" if $DEBUG >= 2;
+  }
+
+  my $params = { names => $pure_volname };
   my $action = {
     name   => 'destroy volume',
     type   => 'volumes',
