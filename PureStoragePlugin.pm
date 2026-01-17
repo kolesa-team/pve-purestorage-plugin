@@ -1618,10 +1618,14 @@ sub status {
 
     my $pod = $response->{ items }->[0];
     if ( $pod ) {
-      # Use quota_limit if set, otherwise fall back to array capacity
-      $total = defined( $pod->{ quota_limit } ) ? $pod->{ quota_limit } : $pod->{ capacity };
+      # Use quota_limit if set and non-zero, otherwise fall back to array capacity
+      # quota_limit = 0 or undef means unlimited (no quota)
+      my $quota = $pod->{ quota_limit };
+      $total = ( defined( $quota ) && $quota > 0 ) ? $quota : $pod->{ capacity };
       $used  = $pod->{ space }->{ total_physical };
-      print "Debug :: Pod quota_limit: " . ( defined( $pod->{ quota_limit } ) ? $pod->{ quota_limit } : 'not set' ) . "\n" if $DEBUG >= 2;
+
+      my $quota_str = defined( $quota ) ? ( $quota > 0 ? $quota : 'unlimited' ) : 'not set';
+      print "Debug :: Pod quota_limit: $quota_str\n" if $DEBUG >= 2;
     } else {
       die "Error :: Pod \"$podname\" not found\n";
     }
