@@ -1535,14 +1535,41 @@ sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::status\n" if $DEBUG;
 
-  my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' }, 0, $storeid );
+  my $total;
+  my $used;
 
-  # Get storage capacity and used space from the response
-  my $array = $response->{ items }->[0];
-  my $total = $array->{ capacity };
-  # total_physical - physically used space on the array (after deduplication and compression)
-  # total_used - logically used space (before deduplication and compression)
-  my $used  = $array->{ space }->{ total_physical };
+  # If using pod with quota, get pod-specific capacity
+  if ( defined $scfg->{ podname } && $scfg->{ podname } ne '' ) {
+    my $podname = $scfg->{ podname };
+    print "Debug :: Getting pod quota for pod: $podname\n" if $DEBUG >= 2;
+
+    my $action = {
+      name   => 'get pod space',
+      type   => 'pods/space',
+      method => 'GET',
+      params => { names => $podname }
+    };
+    my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
+
+    my $pod = $response->{ items }->[0];
+    if ( $pod ) {
+      # Use quota_limit if set, otherwise fall back to array capacity
+      $total = $pod->{ quota_limit } || $pod->{ capacity };
+      $used  = $pod->{ space }->{ total_physical };
+      print "Debug :: Pod quota_limit: " . ( $pod->{ quota_limit } || 'not set' ) . "\n" if $DEBUG >= 2;
+    } else {
+      die "Error :: Pod \"$podname\" not found\n";
+    }
+  } else {
+    # Get array-wide capacity
+    my $response = purestorage_api_call( $scfg, { name => 'get array space', type => 'arrays/space', method => 'GET' }, 0, $storeid );
+
+    my $array = $response->{ items }->[0];
+    $total = $array->{ capacity };
+    # total_physical - physically used space on the array (after deduplication and compression)
+    # total_used - logically used space (before deduplication and compression)
+    $used = $array->{ space }->{ total_physical };
+  }
 
   # Calculate free space
   my $free = $total - $used;
