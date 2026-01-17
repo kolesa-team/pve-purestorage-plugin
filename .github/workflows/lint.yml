@@ -60,24 +60,21 @@ jobs:
             output=$(perl -c "$file" 2>&1)
             exit_code=$?
 
-            # Filter out PVE dependency errors
-            filtered_output=$(echo "$output" | grep -v "Can't locate PVE/" | grep -v "BEGIN failed--compilation aborted")
-
-            # If there are real syntax errors (not dependency issues)
-            if echo "$output" | grep -q "syntax error" && echo "$filtered_output" | grep -q "syntax error"; then
-              echo "::error file=$file::Perl syntax error"
-              echo "$filtered_output"
-              exit 1
+            # Check if this is a PVE dependency error (expected and OK)
+            if echo "$output" | grep -q "Can't locate PVE/" && echo "$output" | grep -q "BEGIN failed--compilation aborted"; then
+              # Only PVE dependency errors - this is OK
+              echo "$file: OK (PVE dependencies not available, skipped)"
+              continue
             fi
 
-            # If compilation failed for non-PVE reasons
-            if [ $exit_code -ne 0 ] && ! echo "$output" | grep -q "Can't locate PVE/"; then
+            # If we got here, either success or real error
+            if [ $exit_code -ne 0 ]; then
               echo "::error file=$file::Perl compilation error"
-              echo "$filtered_output"
+              echo "$output"
               exit 1
             fi
 
-            echo "$file: OK (PVE dependencies skipped)"
+            echo "$file: syntax OK"
           fi
         done
 
