@@ -353,7 +353,7 @@ sub wait_for {
 
 sub prepare_api_params {
   my ( $parms ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::prepare_api_params\n" if $DEBUG;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::prepare_api_params\n" if $DEBUG >= 2;
 
   return $parms unless ref( $parms ) eq 'HASH';
 
@@ -667,7 +667,7 @@ sub read_token_cache {
   return undef unless defined $cache_path;
 
   if ( !-f $cache_path ) {
-    print "Debug :: Token cache file does not exist: $cache_path\n" if $DEBUG;
+    print "Debug :: Token cache file does not exist: $cache_path\n" if $DEBUG >= 2;
     return undef;
   }
 
@@ -675,7 +675,7 @@ sub read_token_cache {
   eval {
     my $json_text = PVE::Tools::file_get_contents( $cache_path );
     $token_data = decode_json( $json_text );
-    print "Debug :: Read token cache from: $cache_path\n" if $DEBUG;
+    print "Debug :: Read token cache from: $cache_path\n" if $DEBUG >= 1;
   };
   if ( $@ ) {
     warn "Warning :: Failed to read token cache from $cache_path: $@\n";
@@ -706,7 +706,7 @@ sub write_token_cache {
     rename( $temp_path, $cache_path )
       or die "Cannot rename $temp_path to $cache_path: $!\n";
 
-    print "Debug :: Wrote token cache to: $cache_path\n" if $DEBUG;
+    print "Debug :: Wrote token cache to: $cache_path\n" if $DEBUG >= 1;
   };
   if ( $@ ) {
     warn "Warning :: Failed to write token cache to $cache_path: $@\n";
@@ -732,14 +732,14 @@ sub is_token_valid {
   my $jitter = 0.05 * (rand() - 0.5);  # -2.5% to +2.5%
   my $refresh_threshold = $ttl * (0.8 + $jitter);
 
-  print "Debug :: Token validation: now=$now, created_at=$token_data->{ created_at }, age=${age}s, threshold=${refresh_threshold}s\n" if $DEBUG;
+  print "Debug :: Token validation: now=$now, created_at=$token_data->{ created_at }, age=${age}s, threshold=${refresh_threshold}s\n" if $DEBUG >= 2;
 
   if ( $age < $refresh_threshold ) {
-    print "Debug :: Token is valid\n" if $DEBUG;
+    print "Debug :: Token is valid (age: ${age}s)\n" if $DEBUG >= 1;
     return 1;
   }
 
-  print "Debug :: Token needs refresh\n" if $DEBUG;
+  print "Debug :: Token needs refresh (age: ${age}s >= threshold: ${refresh_threshold}s)\n" if $DEBUG >= 1;
   return 0;
 }
 
@@ -777,7 +777,7 @@ sub load_auth_token {
     my $cached_token = read_token_cache( $cache_path );
     if ( $cached_token && is_token_valid( $cached_token, $ttl ) ) {
       my $age = time() - $cached_token->{ created_at };
-      print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG;
+      print "Debug :: Using cached token from file (age: ${age}s)\n" if $DEBUG >= 1;
       return (
         $cached_token->{ auth_token },
         $cached_token->{ request_id },
@@ -817,12 +817,12 @@ sub save_token_to_cache {
     my $existing = read_token_cache( $config->{ cache_path } );
     if ( $existing && $existing->{ created_at } > $token_data->{ created_at } - 5 ) {
       # Another node wrote a token within last 5 seconds, use that instead
-      print "Debug :: Another node already cached a token, skipping write\n" if $DEBUG;
+      print "Debug :: Another node already cached a token, skipping write\n" if $DEBUG >= 2;
       return;
     }
 
     write_token_cache( $config->{ cache_path }, $token_data );
-    print "Debug :: Token cached to file: $config->{ cache_path }\n" if $DEBUG;
+    print "Debug :: Token cached to file: $config->{ cache_path }\n" if $DEBUG >= 1;
   };
 
   if ( $@ ) {
@@ -861,7 +861,7 @@ sub is_ignorable_error {
 
 sub purestorage_api_call {
   my ( $scfg, $action, $all, $storeid ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_call\n" if $DEBUG;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_api_call\n" if $DEBUG >= 3;
 
   $all //= 0;
 
@@ -964,17 +964,17 @@ sub purestorage_http_request {
     # Obtain token if needed
     if ( $token_state > TOKEN_STATE_LOGIN ) {
       if ( $token_state == TOKEN_STATE_NEEDED ) {
-        print "Debug :: Requesting new session token\n" if $DEBUG;
+        print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
         ( $error, $content ) = purestorage_http_request( $config, 'login', 'POST', 1 );
 
         # Login failed - check if another node cached a valid token
         if ( $error > ERROR_SUCCESS && $config->{ cache_path } ) {
-          print "Debug :: Login failed, checking if another node cached a token\n" if $DEBUG;
+          print "Debug :: Login failed, checking if another node cached a token\n" if $DEBUG >= 2;
           my $cached_token = read_token_cache( $config->{ cache_path } );
           if ( $cached_token
                && $cached_token->{ auth_token }
                && is_token_valid( $cached_token, $config->{ ttl } || 3600 ) ) {
-            print "Debug :: Using cached token from another node after login failure\n" if $DEBUG;
+            print "Debug :: Using cached token from another node after login failure\n" if $DEBUG >= 2;
             $config->{ auth_token } = $cached_token->{ auth_token };
             $config->{ request_id } = $cached_token->{ request_id };
             $token_state = TOKEN_STATE_CACHED;
@@ -987,7 +987,7 @@ sub purestorage_http_request {
           return ( $error, $content );
         }
       } else {
-        print "Debug :: Using existing session token\n" if $DEBUG;
+        print "Debug :: Using existing session token\n" if $DEBUG >= 2;
       }
       $headers->header( 'x-auth-token' => $config->{ auth_token } );
     }
@@ -1002,7 +1002,7 @@ sub purestorage_http_request {
     if ( $error && $token_state == TOKEN_STATE_CACHED && $response->code == 401 ) {
       $retry_count++;
       if ( $retry_count <= $max_retries ) {
-        print "Debug :: Session token expired (401), retry $retry_count/$max_retries\n" if $DEBUG;
+        print "Debug :: Session token expired (401), retry $retry_count/$max_retries\n" if $DEBUG >= 1;
 
         # Race condition mitigation: check if another node already refreshed token
         if ( $config->{ cache_path } ) {
@@ -1012,7 +1012,7 @@ sub purestorage_http_request {
                && $fresh_token->{ auth_token } ne $config->{ auth_token }
                && is_token_valid( $fresh_token, $config->{ ttl } || 3600 ) ) {
             # Another node already cached a valid token, use it
-            print "Debug :: Using refreshed token from another node\n" if $DEBUG;
+            print "Debug :: Using refreshed token from another node\n" if $DEBUG >= 2;
             $config->{ auth_token } = $fresh_token->{ auth_token };
             $config->{ request_id } = $fresh_token->{ request_id };
             $token_state = TOKEN_STATE_CACHED;
@@ -1021,12 +1021,12 @@ sub purestorage_http_request {
         }
 
         # No valid token from other nodes, request new one
-        print "Debug :: Requesting new session token\n" if $DEBUG;
+        print "Debug :: Requesting new session token\n" if $DEBUG >= 1;
         cleanup_token_cache( $config );
         $token_state = TOKEN_STATE_NEEDED;
         next;
       } else {
-        print "Debug :: Max retries ($max_retries) reached, giving up\n" if $DEBUG;
+        print "Debug :: Max retries ($max_retries) reached, giving up\n" if $DEBUG >= 1;
         last;
       }
     }
@@ -1066,7 +1066,7 @@ sub purestorage_http_request {
 
 sub purestorage_list_volumes {
   my ( $class, $scfg, $vmid, $storeid, $destroyed ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::purestorage_list_volumes\n" if $DEBUG >= 2;
 
   $vmid = '*' unless defined( $vmid );
   my $names = "vm-$vmid-disk-*,vm-$vmid-cloudinit,vm-$vmid-state-*";
@@ -1419,7 +1419,7 @@ sub purestorage_snap_volume_delete {
 
 sub parse_volname {
   my ( $class, $volname ) = @_;
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::parse_volname\n" if $DEBUG;
+  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::parse_volname\n" if $DEBUG >= 3;
 
   if ( $volname =~ m/^(vm|base)-(\d+)-(\S+)$/ ) {
     my $vtype = ( $1 eq "vm" ) ? "images" : "base";    # Determine volume type
@@ -1523,7 +1523,7 @@ sub free_image {
 sub list_images {
   my ( $class, $storeid, $scfg, $vmid, $vollist, $cache ) = @_;
   set_debug_from_config( $scfg );
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::list_images\n" if $DEBUG;
+  print "Debug :: list_images ($storeid, vmid=" . ( $vmid // 'all' ) . ")\n" if $DEBUG >= 1;
 
   return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
 }
@@ -1554,7 +1554,7 @@ sub status {
 sub activate_storage {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   set_debug_from_config( $scfg );
-  print "Debug :: PVE::Storage::Custom::PureStoragePlugin::sub::activate_storage\n" if $DEBUG;
+  print "Debug :: activate_storage ($storeid)\n" if $DEBUG >= 1;
 
   return 1;
 }
