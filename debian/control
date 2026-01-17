@@ -10,10 +10,17 @@ Build-Depends: debhelper, devscripts
 
 Package: libpve-storage-purestorage-perl
 Architecture: all
-Depends: ${perl:Depends}, ${misc:Depends}, libpve-storage-perl (>= 8.2.1), multipath-tools
+Depends: ${perl:Depends}, ${misc:Depends},
+ libpve-storage-perl (>= 8.2.1),
+ multipath-tools,
+ libjson-xs-perl,
+ libwww-perl,
+ liburi-perl
 Description: Pure Storage integration library for Proxmox VE
  This package provides a Perl library to integrate Pure FlashArray Storage systems
  with the Proxmox VE storage management infrastructure.
  .
  It allows administrators to configure and manage Pure FlashArray Storage devices
  directly within the Proxmox VE environment.
+ .
+ Supports Proxmox VE 8.2+ and Proxmox VE 9+.
