@@ -56,10 +56,28 @@ jobs:
         for file in $changed_files; do
           if [[ "$file" == *.pm ]] || [[ "$file" == *.pl ]]; then
             echo "Checking $file..."
-            perl -c "$file" || {
+            # Check syntax, ignore missing PVE dependencies
+            output=$(perl -c "$file" 2>&1)
+            exit_code=$?
+
+            # Filter out PVE dependency errors
+            filtered_output=$(echo "$output" | grep -v "Can't locate PVE/" | grep -v "BEGIN failed--compilation aborted")
+
+            # If there are real syntax errors (not dependency issues)
+            if echo "$output" | grep -q "syntax error" && echo "$filtered_output" | grep -q "syntax error"; then
               echo "::error file=$file::Perl syntax error"
+              echo "$filtered_output"
               exit 1
-            }
+            fi
+
+            # If compilation failed for non-PVE reasons
+            if [ $exit_code -ne 0 ] && ! echo "$output" | grep -q "Can't locate PVE/"; then
+              echo "::error file=$file::Perl compilation error"
+              echo "$filtered_output"
+              exit 1
+            fi
+
+            echo "$file: OK (PVE dependencies skipped)"
           fi
         done
 
