@@ -10,6 +10,7 @@ disks, providing high performance and reliability.
 ## Table of Contents
 
 - [Features](#features)
+- [Features](#features)
 - [Prerequisites](#prerequisites)
   - [Multipath Configuration](#multipath-configuration)
   - [iSCSI Configuration](#iscsi-configuration)
@@ -87,6 +88,7 @@ blacklist {
 
 blacklist_exceptions {
   wwid "3624a9370.*"
+  wwid "3624a9370.*"
   device {
     vendor "PURE"
   }
@@ -118,13 +120,19 @@ To manually install the plugin, follow these steps:
 ```bash
 # Clone repository
 git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
+git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
 # Navigate to the Plugin Directory
+cd pve-purestorage-plugin
+# Create the custom plugin directory if it does not already exist
+mkdir /usr/share/perl5/PVE/Storage/Custom
 cd pve-purestorage-plugin
 # Create the custom plugin directory if it does not already exist
 mkdir /usr/share/perl5/PVE/Storage/Custom
 # Copy plugin to custom plugin directory
 cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
+cp PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
 # Restart Proxmox VE
+systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
 ```
 
@@ -140,6 +148,8 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 ```
 
 ## Configuration
+> [!TIP]
+> If your are using a cluster setup - this step needs to be executed only on one note of the cluster - corosync will do the rest for you.
 
 > [!TIP]
 > If you are using a cluster setup - this step needs to be executed only
@@ -175,6 +185,7 @@ purestorage: <storage_id>
 
 | Parameter | Description |
 | --------- | ----------- |
+| storage_id | The storage identifier (name under which it will appear in the Storage list) |
 | storage_id | The storage identifier (name under which it will appear in the Storage list) |
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
 | address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. For high availability or Active Cluster configuration (experimental), you can specify multiple arrays separated by commas (e.g., `https://array1.example.com,https://array2.example.com`). When multiple arrays are specified, the plugin automatically connects volumes to hosts on all arrays. |
