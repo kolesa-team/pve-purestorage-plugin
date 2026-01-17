@@ -101,8 +101,8 @@ sudo iscsiadm -m node --op update -n node.startup -v automatic
 ```
 
 > [!CAUTION]
-> As long as there are no hostX entries in /sys/class/iscsi_host/ the
-> plugin is not ready to be used.
+> As long as there are no hostX entries in /sys/class/iscsi_host/ the plugin
+> is not ready to be used.
 
 ## Installation
 
