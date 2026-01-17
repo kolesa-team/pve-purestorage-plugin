@@ -641,13 +641,17 @@ sub read_token_cache {
   my ( $cache_path ) = @_;
 
   return undef unless defined $cache_path;
-  return undef unless -f $cache_path;
 
+  if ( !-f $cache_path ) {
+    print "Debug :: Token cache file does not exist: $cache_path\n" if $DEBUG;
+    return undef;
+  }
+
+  my $token_data;
   eval {
     my $json_text = PVE::Tools::file_get_contents( $cache_path );
-    my $token_data = decode_json( $json_text );
+    $token_data = decode_json( $json_text );
     print "Debug :: Read token cache from: $cache_path\n" if $DEBUG;
-    return $token_data;
   };
   if ( $@ ) {
     warn "Warning :: Failed to read token cache from $cache_path: $@\n";
@@ -655,6 +659,8 @@ sub read_token_cache {
     eval { unlink $cache_path };
     return undef;
   }
+
+  return $token_data;
 }
 
 sub write_token_cache {
@@ -702,12 +708,14 @@ sub is_token_valid {
   my $jitter = 0.05 * (rand() - 0.5);  # -2.5% to +2.5%
   my $refresh_threshold = $ttl * (0.8 + $jitter);
 
+  print "Debug :: Token validation: now=$now, created_at=$token_data->{ created_at }, age=${age}s, threshold=${refresh_threshold}s\n" if $DEBUG;
+
   if ( $age < $refresh_threshold ) {
-    print "Debug :: Token is valid (age: ${age}s, threshold: ${refresh_threshold}s)\n" if $DEBUG;
+    print "Debug :: Token is valid\n" if $DEBUG;
     return 1;
   }
 
-  print "Debug :: Token needs refresh (age: ${age}s >= threshold: ${refresh_threshold}s)\n" if $DEBUG;
+  print "Debug :: Token needs refresh\n" if $DEBUG;
   return 0;
 }
 
@@ -755,11 +763,9 @@ sub load_auth_token {
     }
   }
 
-  # Fallback to in-memory cache
-  my $auth_token = $scfg->{ '_auth_token' . $array_index };
-  my $request_id = $scfg->{ '_request_id' . $array_index };
-
-  return ( $auth_token, $request_id, $cache_path, $ttl );
+  # File cache is expired or missing, do not fallback to in-memory cache
+  # Return undef for auth_token to force new token request
+  return ( undef, undef, $cache_path, $ttl );
 }
 
 sub save_token_to_cache {
