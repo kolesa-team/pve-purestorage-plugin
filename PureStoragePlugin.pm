@@ -702,7 +702,7 @@ sub write_token_cache {
   eval {
     my $fh = IO::File->new( $temp_path, 'w', 0600 )
       or die "Cannot create temp file $temp_path: $!\n";
-    print $fh $json_text;
+    print $fh $json_text . "\n";
     $fh->close();
 
     rename( $temp_path, $cache_path )
