@@ -119,7 +119,7 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 ## Configuration
 
 > [!TIP]
-> If your are using a cluster setup - this step needs to be executed only on one note of the cluster - corosync will do the rest for you.
+> If you are using a cluster setup - this step needs to be executed only on one node of the cluster - corosync will do the rest for you.
 
 After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to open shell and use `pvesm` command to add it:
 
@@ -149,14 +149,15 @@ purestorage: <storage_id>
 | --------- | ----------- |
 | storage_id | The storage identifier (name under which it will appear in the Storage list) |
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
-| address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. |
-| token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. |
+| address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. For high availability, you can specify multiple arrays separated by commas (e.g., `https://array1.example.com,https://array2.example.com`). |
+| token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. For multiple arrays, specify tokens separated by commas in the same order as addresses. |
 | vgname | (`optional`, conflicts with `podname`) The volume group name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
 | podname | (`optional`, conflicts with `vgname`) The pod name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
 | vnprefix | (`optional`) The prefix to prepend to name of virtual disks. |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
 | content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
-| protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (iscsi, fc) |
+| protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (`iscsi`, `fc`). |
+| check_ssl | (`optional`, default is `no`) Verify the server's TLS certificate. Set to `yes` to enable SSL certificate verification. |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
 | debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Can also be set via `PURESTORAGE_DEBUG` environment variable. |
 
@@ -181,22 +182,26 @@ If you encounter issues while using the plugin, consider the following steps:
 Enable debug logging to diagnose issues:
 
 **Temporary (for single command):**
+
 ```bash
 PURESTORAGE_DEBUG=1 pvesm list <storage_id>
 ```
 
 **Persistent (via configuration):**
+
 ```bash
 pvesm set <storage_id> --debug 1
 ```
 
 Debug levels:
+
 - `0` - Off (production, default)
 - `1` - Basic (token operations, main function calls)
 - `2` - Verbose (HTTP requests, token validation details)
 - `3` - Trace (all internal operations)
 
 **Example debug output:**
+
 ```bash
 PURESTORAGE_DEBUG=1 pvesm list pure-n1
 Debug :: activate_storage (pure-n1)
