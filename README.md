@@ -19,7 +19,7 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 ## Features
 
 - Easily enable and configure multipathing iSCSI to the Pure Array
-- **Active Cluster support** - Automatic volume connection on both arrays in Active Cluster configuration
+- **Active Cluster support (Experimental)** - Automatic volume connection on both arrays in Active Cluster configuration
   - Volumes are automatically connected to hosts on both primary and secondary arrays
   - Ensures high availability and optimal connectivity in Active Cluster setups
 - Storage based snapshots
@@ -154,7 +154,7 @@ purestorage: <storage_id>
 | --------- | ----------- |
 | storage_id | The storage identifier (name under which it will appear in the Storage list) |
 | nodes | (`optional`) A comma-separated list of Proxmox node names. Use this parameter to limit the plugin to specific nodes in your cluster. If omitted, the storage is available to all nodes. |
-| address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. For high availability or Active Cluster configuration, you can specify multiple arrays separated by commas (e.g., `https://array1.example.com,https://array2.example.com`). When multiple arrays are specified, the plugin automatically connects volumes to hosts on all arrays. |
+| address | The URL or IP address of the Pure Storage API endpoint. Ensure that the Proxmox VE nodes can reach this address over the network. For high availability or Active Cluster configuration (experimental), you can specify multiple arrays separated by commas (e.g., `https://array1.example.com,https://array2.example.com`). When multiple arrays are specified, the plugin automatically connects volumes to hosts on all arrays. |
 | token | The API token used for authentication with the Pure Storage array. This token must have sufficient permissions to create and manage volumes. For multiple arrays, specify tokens separated by commas in the same order as addresses. Each token must have permissions for its corresponding array. |
 | vgname | (`optional`, conflicts with `podname`) The volume group name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
 | podname | (`optional`, conflicts with `vgname`) The pod name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
@@ -179,7 +179,7 @@ purestorage: pure
   content images
 ```
 
-**Active Cluster (Multiple Arrays):**
+**Active Cluster (Multiple Arrays) - Experimental:**
 ```text
 purestorage: pure-cluster
   address https://array1.example.com,https://array2.example.com
@@ -189,7 +189,7 @@ purestorage: pure-cluster
 ```
 
 > [!NOTE]
-> When multiple arrays are specified (Active Cluster configuration), the plugin automatically connects volumes to hosts on both arrays. This ensures high availability - if one array fails, volumes remain accessible through the other array. The plugin handles connection management on all arrays transparently.
+> When multiple arrays are specified (Active Cluster configuration - experimental feature), the plugin automatically connects volumes to hosts on both arrays. This ensures high availability - if one array fails, volumes remain accessible through the other array. The plugin handles connection management on all arrays transparently.
 
 ## Troubleshooting
 
