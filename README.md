@@ -2,7 +2,10 @@
 
 [![Checks](https://github.com/kolesa-team/pve-purestorage-plugin/actions/workflows/checks.yml/badge.svg)](https://github.com/kolesa-team/pve-purestorage-plugin/actions/workflows/checks.yml)
 
-This plugin enables the integration of Pure Storage arrays with Proxmox Virtual Environment (VE) using multipath iSCSI or Fibre Channel (FC). It allows you to use Pure Storage as a backend for your virtual machine disks, providing high performance and reliability.
+This plugin enables the integration of Pure Storage arrays with Proxmox
+Virtual Environment (VE) using multipath iSCSI or Fibre Channel (FC).
+It allows you to use Pure Storage as a backend for your virtual machine
+disks, providing high performance and reliability.
 
 ## Table of Contents
 
@@ -19,24 +22,34 @@ This plugin enables the integration of Pure Storage arrays with Proxmox Virtual 
 ## Features
 
 - Easily enable and configure multipathing iSCSI to the Pure Array
-- **Active Cluster support (Experimental)** - Automatic volume connection on both arrays in Active Cluster configuration
-  - Volumes are automatically connected to hosts on both primary and secondary arrays
-  - Ensures high availability and optimal connectivity in Active Cluster setups
+- **Active Cluster support (Experimental)** - Automatic volume connection
+  on both arrays in Active Cluster configuration
+  - Volumes are automatically connected to hosts on both primary and
+    secondary arrays
+  - Ensures high availability and optimal connectivity in Active Cluster
+    setups
 - Storage based snapshots
   - Snapshots are presented in Proxmox like any other native Snapshot to a VM
   - Snapshots are created by the Pure Array, making them deduped and instant
 - Instant storage migration
-  - The plugin will automatically map the iSCSI volumes needed on the host the VM is being migrated to
+  - The plugin will automatically map the iSCSI volumes needed on the
+    host the VM is being migrated to
 
 ## Prerequisites
 
-Before installing and using this plugin, ensure that your Proxmox VE environment meets the following prerequisites.
+Before installing and using this plugin, ensure that your Proxmox VE
+environment meets the following prerequisites.
 
 ### Multipath Configuration
 
-To ensure correct operation with Pure Storage, you need to configure your multipath settings appropriately. Specifically, you need to set find_multipaths to no in your multipath.conf file. This setting disables the automatic detection of multipath devices, which is necessary for Pure Storage devices to be correctly recognized.
+To ensure correct operation with Pure Storage, you need to configure your
+multipath settings appropriately. Specifically, you need to set
+find_multipaths to no in your multipath.conf file. This setting disables
+the automatic detection of multipath devices, which is necessary for Pure
+Storage devices to be correctly recognized.
 
-Below is an example of how your multipath.conf file should look when configured for Pure Storage arrays:
+Below is an example of how your multipath.conf file should look when
+configured for Pure Storage arrays:
 
 ```text
 defaults {
@@ -88,11 +101,13 @@ sudo iscsiadm -m node --op update -n node.startup -v automatic
 ```
 
 > [!CAUTION]
-> As long as there are no hostX entries in /sys/class/iscsi_host/ the plugin is not ready to be used.
+> As long as there are no hostX entries in /sys/class/iscsi_host/ the
+> plugin is not ready to be used.
 
 ## Installation
 
-There are two methods to install the plugin: manual installation and APT package installation.
+There are two methods to install the plugin: manual installation and APT
+package installation.
 
 ### Manual
 
@@ -113,7 +128,8 @@ systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveprox
 
 ### APT
 
-**Note**: Replace `<PACKAGE_VERSION>` with your desired version number (e.g., `0.0.1`).
+**Note**: Replace `<PACKAGE_VERSION>` with your desired version number
+(e.g., `0.0.1`).
 
 ```bash
 PACKAGE_VERSION="<PACKAGE_VERSION>" curl -L -o libpve-storage-purestorage-perl.deb "https://github.com/kolesa-team/pve-purestorage-plugin/releases/download/v$PACKAGE_VERSION/libpve-storage-purestorage-perl_$PACKAGE_VERSION-1_all.deb"
@@ -124,9 +140,12 @@ sudo apt install ./libpve-storage-purestorage-perl.deb
 ## Configuration
 
 > [!TIP]
-> If you are using a cluster setup - this step needs to be executed only on one node of the cluster - corosync will do the rest for you.
+> If you are using a cluster setup - this step needs to be executed only
+> on one node of the cluster - corosync will do the rest for you.
 
-After installing the plugin, you need to configure Proxmox VE to use it. Since Proxmox VE does not currently support adding custom storage plugins via the GUI, you will need to open shell and use `pvesm` command to add it:
+After installing the plugin, you need to configure Proxmox VE to use it.
+Since Proxmox VE does not currently support adding custom storage plugins
+via the GUI, you will need to open shell and use `pvesm` command to add it:
 
 ```bash
 pvesm add purestorage <storage_id> \
@@ -138,7 +157,8 @@ pvesm add purestorage <storage_id> \
    --content images
 ```
 
-Alternatively, you can manually edit the storage configuration file `/etc/pve/storage.cfg`.
+Alternatively, you can manually edit the storage configuration file
+`/etc/pve/storage.cfg`.
 
 ```text
 purestorage: <storage_id>
@@ -166,11 +186,13 @@ purestorage: <storage_id>
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
 | debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Environment variable `PURESTORAGE_DEBUG` can be used as fallback when `debug` is not set in config. |
 
-> **_NOTE:_** Ensure that the token and other sensitive information are kept secure and not exposed publicly.
+> **_NOTE:_** Ensure that the token and other sensitive information are
+> kept secure and not exposed publicly.
 
 Example Configuration:
 
 **Single Array:**
+
 ```text
 purestorage: pure
   address https://purestorage.example.com
@@ -180,6 +202,7 @@ purestorage: pure
 ```
 
 **Active Cluster (Multiple Arrays) - Experimental:**
+
 ```text
 purestorage: pure-cluster
   address https://array1.example.com,https://array2.example.com
@@ -189,11 +212,16 @@ purestorage: pure-cluster
 ```
 
 > [!NOTE]
-> When multiple arrays are specified (Active Cluster configuration - experimental feature), the plugin automatically connects volumes to hosts on both arrays. This ensures high availability - if one array fails, volumes remain accessible through the other array. The plugin handles connection management on all arrays transparently.
+> When multiple arrays are specified (Active Cluster configuration -
+> experimental feature), the plugin automatically connects volumes to hosts
+> on both arrays. This ensures high availability - if one array fails,
+> volumes remain accessible through the other array. The plugin handles
+> connection management on all arrays transparently.
 
 ## Troubleshooting
 
-If you encounter issues while using the plugin, consider the following steps:
+If you encounter issues while using the plugin, consider the following
+steps:
 
 ### Debug Logging
 
@@ -211,7 +239,8 @@ pvesm set <storage_id> --debug 1
 PURESTORAGE_DEBUG=1 pvesm list <storage_id>
 ```
 
-> **Note:** If `debug` is set in storage configuration, it takes priority over `PURESTORAGE_DEBUG` environment variable.
+> **Note:** If `debug` is set in storage configuration, it takes priority
+> over `PURESTORAGE_DEBUG` environment variable.
 
 Debug levels:
 
@@ -233,7 +262,8 @@ Debug :: Using cached token from file (age: 125s)
 
 ### Service Status
 
-Ensure that the Proxmox VE services are running correctly. You can restart the services if necessary:
+Ensure that the Proxmox VE services are running correctly. You can restart
+the services if necessary:
 
 ```bash
 sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pveproxy.service pvescheduler.service
@@ -241,9 +271,12 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
 
 ### Network and Storage
 
-- Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach the Pure Storage array over the network. Check for firewall rules or network issues that might be blocking communication.
-- Review Logs: Check the Proxmox VE logs for any error messages related to storage or the plugin. Logs are typically found in /var/log/pve.
-  These commands are helpful for troubleshooting:
+- Verify Network Connectivity: Ensure that the Proxmox VE nodes can reach
+  the Pure Storage array over the network. Check for firewall rules or
+  network issues that might be blocking communication.
+- Review Logs: Check the Proxmox VE logs for any error messages related to
+  storage or the plugin. Logs are typically found in /var/log/pve. These
+  commands are helpful for troubleshooting:
 
   ```bash
   multipath -ll -v3 #diagnose issues with the multipath service
@@ -251,13 +284,18 @@ sudo systemctl restart pve-cluster.service pvedaemon.service pvestatd.service pv
   ls -l /dev/mapper/3624a9370* #list wwids of Pure mapped devices on the system
   ```
 
-- Multipath Configuration: Verify that your multipath.conf is correctly configured and that multipath devices are recognized. Use multipath -ll to list the current multipath devices.
-- API Token Permissions: Ensure that the API token used has the necessary permissions to create and manage volumes on the Pure Storage array.
-- Plugin Updates: Ensure you are using the latest version of the plugin. Check the GitHub repository for updates.
+- Multipath Configuration: Verify that your multipath.conf is correctly
+  configured and that multipath devices are recognized. Use multipath -ll
+  to list the current multipath devices.
+- API Token Permissions: Ensure that the API token used has the necessary
+  permissions to create and manage volumes on the Pure Storage array.
+- Plugin Updates: Ensure you are using the latest version of the plugin.
+  Check the GitHub repository for updates.
 
 ### Known issues
 
-- `lvm inside a volume`: If you plan to use LVM inside a volume, it is better to add purestorage volumes to the ignore list to avoid scanning.
+- `lvm inside a volume`: If you plan to use LVM inside a volume, it is
+  better to add purestorage volumes to the ignore list to avoid scanning.
 
 ```bash
 cat /etc/lvm/lvmlocal.conf
