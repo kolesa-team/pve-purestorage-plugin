@@ -125,8 +125,9 @@ sub api {
 # PVE 7.1: APIVER 10 a799f7529b9c4430fee13e5b939fe3723b650766 / rm/add volume_snapshot_{list,info} (not used); blockers to volume_rollback_is_possible (not used)
 # PVE 8.4: APIVER 11 e2dc01ac9f06fe37cf434bad9157a50ecc4a99ce / new_backup_provider/sensitive_properties; backup provider might be interesting, we can look at it later
 # PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
+# PVE 9:   APIVER 13 / hints parameters and on_update_hook_full
 
-  my $tested_apiver = 12;
+  my $tested_apiver = 13;
 
   my $apiver = PVE::Storage::APIVER;
   my $apiage = PVE::Storage::APIAGE;
@@ -1811,7 +1812,7 @@ sub volume_size_info {
 }
 
 sub map_volume {
-  my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
+  my ( $class, $storeid, $scfg, $volname, $snapname, $hints ) = @_;
   $logger->( P_DEBUG, "map_volume", $scfg );
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
 
@@ -1934,12 +1935,12 @@ sub unmap_volume {
 }
 
 sub activate_volume {
-  my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
+  my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $logger->( P_DEBUG, "activate_volume", $scfg );
 
   $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
 
-  $class->map_volume( $storeid, $scfg, $volname, $snapname );
+  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
   return 1;
 }
 
@@ -2045,5 +2046,12 @@ sub volume_has_feature {
   }
   return 1 if $features->{ $feature }->{ $key };
   return undef;
+}
+
+sub on_update_hook_full {
+  my ( $class, $storeid, $scfg, $updated_props, $deleted_props ) = @_;
+  $logger->( P_DEBUG, "on_update_hook_full", $scfg );
+
+  return;
 }
 1;
