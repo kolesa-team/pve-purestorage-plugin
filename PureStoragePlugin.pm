@@ -7,6 +7,7 @@ use Data::Dumper qw( Dumper );    # DEBUG
 
 use IO::File   ();
 use File::Path ();
+use Fcntl      qw(O_WRONLY);
 
 use PVE::JSONSchema ();
 use PVE::Network    ();
@@ -513,9 +514,31 @@ sub get_device_size {
 sub device_op {
   my ( $device_path, $op, $value ) = @_;
 
-  open( my $fh, '>', $device_path . '/' . $op ) or $fatal->( "Could not open file \"$device_path/$op\" for writing.", undef );
-  print $fh $value;
-  close( $fh );
+  my $path = $device_path . '/' . $op;
+
+  # Open for writing, no buffering, and handle errors explicitly
+  sysopen( my $fh, $path, O_WRONLY ) or do {
+    $logger->( P_WARN, "Cannot open $path for writing: $!", undef );
+    return;
+  };
+
+  # The Write: Use a newline as many drivers require '\n' to trigger the store function
+  my $payload = "$value\n";
+  my $result  = syswrite( $fh, $payload );
+
+  # Handle the error specifically
+  if ( !defined $result ) {
+    my $err = $!;
+    close( $fh );    # Close regardless of error
+
+    if ( $err =~ /Invalid argument/i ) {
+      $logger->( P_WARN, "Kernel rejected '$value' for $path (EINVAL). Device may be busy, mounted, or driver doesn't support this transition.", undef );
+      return;
+    }
+    $logger->( P_WARN, "Critical failure writing to $path: $err", undef );
+  }
+
+  close( $fh ) or $logger->( P_WARN, "Failed to close file \"$path\" (write may have succeeded).", undef );
 }
 
 sub block_device_action {
@@ -529,10 +552,19 @@ sub block_device_action {
     }
     $device = $1;    # untaint
     my $device_path = '/sys/block/' . $device . '/device';
-    if ( $action eq 'remove' ) {
-      $logger->( P_DEBUG, "Removing device: $device", undef );
+    if ( $action eq 'offline' ) {
+      $logger->( P_DEBUG, "Make device offline: $device", undef );
       exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ] );
-      device_op( $device_path, 'state',  'offline' );
+      device_op( $device_path, 'state', 'offline' );
+    } elsif ( $action eq 'delete' ) {
+      $logger->( P_DEBUG, "Delete device: $device", undef );
+
+      # Check state is offline before delete
+      my $state = file_read_firstline( $device_path . '/state' );
+      if ( $state ne 'offline' ) {
+        $logger->( P_WARN, "Device $device is not offline (state: $state)", undef );
+      }
+
       device_op( $device_path, 'delete', '1' );
     } elsif ( $action eq 'rescan' ) {
       $logger->( P_DEBUG, "Rescanning: $device", undef );
@@ -1842,8 +1874,51 @@ sub map_volume {
   return $path;
 }
 
+=head2 unmap_volume
+
+Unmaps a volume from the system, handling device cleanup and multipath removal.
+
+This method safely disconnects a volume by flushing caches, offlining devices,
+removing multipath mappings if applicable, and cleaning up device nodes.
+
+Parameters:
+  $class - The class instance (implicit first parameter)
+  $storeid - Storage identifier
+  $scfg - Storage configuration hash reference
+  $volname - Volume name to unmap
+  $deactivate_cb - Optional callback subroutine to execute after device offlining
+
+The callback exists to prevent race conditions between offlining devices,
+making the storage unavailable, and finally deleting the device nodes.
+This prevents the udev checker from re-adding devices before final cleanup is complete.
+
+Returns:
+  1 on success, 0 if volume path doesn't exist or isn't a block device
+
+The function performs the following operations:
+
+=over
+
+=item * Retrieves the device path and WWID for the volume
+
+=item * Flushes filesystem and device buffers to ensure data integrity
+
+=item * Waits for udev events to settle
+
+=item * Removes multipath mapping if the device is multipath-enabled
+
+=item * Offlines all slave devices
+
+=item * Executes the deactivation callback if provided
+
+=item * Deletes the slave device nodes
+
+=back
+
+=cut
+
 sub unmap_volume {
-  my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
+  my ( $class, $storeid, $scfg, $volname, $deactivate_cb ) = @_;
   $logger->( P_DEBUG, "unmap_volume", $scfg );
 
   my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
@@ -1871,8 +1946,14 @@ sub unmap_volume {
     $logger->( P_DEBUG, "Device \"$wwid\" is not a multipath device. Skipping multipath removal.", $scfg );
   }
 
-  # Iterate through slaves and remove each device
-  block_device_action( 'remove', @slaves );
+  # Iterate through slaves and offline each device
+  block_device_action( 'offline', @slaves );
+
+  if ( $deactivate_cb ) {
+    $deactivate_cb->();
+  }
+
+  block_device_action( 'delete', @slaves );
 
   $logger->( P_DEBUG, "Device \"$wwid\" is removed.", $scfg );
   return 1;
@@ -1892,9 +1973,11 @@ sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   $logger->( P_DEBUG, "deactivate_volume", $scfg );
 
-  $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
+  my $deactivate_cb = sub {
+    $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 );
+  };
 
-  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 );
+  $class->unmap_volume( $storeid, $scfg, $volname, $deactivate_cb );
 
   $logger->( P_INFO, "Volume \"$volname\" is deactivated.", $scfg );
 
