@@ -5,11 +5,13 @@
 This plugin enables the integration of Pure Storage arrays with Proxmox
 Virtual Environment (VE) using multipath iSCSI or Fibre Channel (FC).
 It allows you to use Pure Storage as a backend for your virtual machine
-disks, providing high performance and reliability.
+disks, and optionally for LXC container root volumes when configured,
+providing high performance and reliability.
 
 ## Table of Contents
 
 - [Features](#features)
+- [Linux containers (LXC)](#linux-containers-lxc)
 - [Prerequisites](#prerequisites)
   - [Multipath Configuration](#multipath-configuration)
   - [iSCSI Configuration](#iscsi-configuration)
@@ -39,6 +41,21 @@ disks, providing high performance and reliability.
 - Instant storage migration
   - The plugin will automatically map the iSCSI volumes needed on the
     host the VM is being migrated to
+- Optional **LXC** support — include `rootdir` in `content` to allow raw
+  image-backed container root disks on the same block path as QEMU disks
+  (see [Linux containers (LXC)](#linux-containers-lxc))
+
+## Linux containers (LXC)
+
+The plugin exposes the Proxmox **`rootdir`** content type so a storage
+section can host **LXC root filesystems** as raw volumes, alongside
+`images` (QEMU disks), when you set e.g. `content images,rootdir`.
+
+LXC on this backend uses the same allocation and device path logic as VM
+disks. **Support is best-effort and community-tested** — validate create,
+resize, and delete for your workloads on a real array before relying on it
+in production. If you only need QEMU VMs, keep `content images` (omit
+`rootdir`).
 
 ## Prerequisites
 
@@ -234,6 +251,10 @@ pvesm add purestorage <storage_id> \
    --content images
 ```
 
+To allow **LXC container root disks** on the same pool as well, use
+`--content images,rootdir` instead of `--content images` (see
+[Linux containers (LXC)](#linux-containers-lxc)).
+
 Alternatively, you can manually edit the storage configuration file
 `/etc/pve/storage.cfg`.
 
@@ -257,7 +278,7 @@ purestorage: <storage_id>
 | podname | (`optional`, conflicts with `vgname`) The pod name where virtual disks will be stored. This should match the configuration on your Pure Storage array. |
 | vnprefix | (`optional`) The prefix to prepend to name of virtual disks. |
 | hgsuffix | (`optional`) A suffix that is appended to the hostname when the plugin interacts with the Pure Storage array. This can help differentiate hosts if necessary. |
-| content | Specifies the types of content that can be stored. For virtual machine disk images, use images. |
+| content | Specifies the types of content that can be stored. Use `images` for QEMU VM disks. Add `rootdir` (e.g. `images,rootdir`) to allow LXC root volumes on the same pool; see [Linux containers (LXC)](#linux-containers-lxc). |
 | protocol | (`optional`, default is `iscsi`) Specifies the storage protocol (`iscsi`, `fc`). |
 | check_ssl | (`optional`, default is `no`) Verify the server's TLS certificate. Set to `yes` to enable SSL certificate verification. |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
@@ -287,6 +308,18 @@ purestorage: pure-cluster
   token token1,token2
   vgname pure_vg
   content images
+```
+
+**LXC-capable pool** (`images` and `rootdir`; best-effort — see
+[Linux containers (LXC)](#linux-containers-lxc)):
+
+```text
+purestorage: pure-lxc
+  address https://purestorage.example.com
+  token abc123
+  vgname pure_vg
+  hgsuffix ""
+  content images,rootdir
 ```
 
 > [!NOTE]
