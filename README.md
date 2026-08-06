@@ -38,6 +38,15 @@ providing high performance and reliability.
 - Storage based snapshots
   - Snapshots are presented in Proxmox like any other native Snapshot to a VM
   - Snapshots are created by the Pure Array, making them deduped and instant
+- Protection-group snapshot sync (QEMU)
+  - Scheduled or manual Pure protection-group snapshots (e.g. `pgroup-auto.277`)
+    are imported into the VM snapshot tree as sanitized names
+    (e.g. `pgroup-auto-277`)
+  - The snapshot description keeps the exact Pure parent and per-disk member
+    names for rollback
+  - Sync runs from storage `status()` about every 30 seconds (25s timeout);
+    imported entries are read-only for delete in Proxmox — remove them on the
+    array. LXC/`rootdir` configs are not updated by this sync path.
 - Instant storage migration
   - The plugin will automatically map the iSCSI volumes needed on the
     host the VM is being migrated to
