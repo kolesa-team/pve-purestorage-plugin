@@ -1577,7 +1577,9 @@ sub purestorage_volume_restore {
 
   purestorage_api_call( $scfg, $action, 0, $storeid );
 
-  my $source = length( $exact_snap_name // '' ) ? 'snapshot "' . $exact_snap_name . '"'
+  my $source =
+    length( $exact_snap_name // '' )
+    ? 'snapshot "' . $exact_snap_name . '"'
     : ( length( $snap ) ? 'snapshot "' . $snap . '"' : '' );
   if ( $volname ne $svolname ) {
     $source .= ' of ' if $source ne '';
@@ -1691,7 +1693,7 @@ sub purestorage_vm_snap_description {
 
 sub purestorage_snap_is_pg_imported {
   my ( $class, $volname, $snap ) = @_;
-  my ( undef, undef, $vmid ) = eval { $class->parse_volname( $volname ) };
+  my ( undef,  undef,    $vmid ) = eval { $class->parse_volname( $volname ) };
   return 0 unless defined $vmid;
   my $desc = purestorage_vm_snap_description( $vmid, $snap );
   return defined( purestorage_pg_description_parent( $desc ) ) ? 1 : 0;
@@ -1716,6 +1718,7 @@ sub purestorage_resolve_imported_snap {
   }
 
   $parent //= do {
+
     # Fall back: find a pgroup parent whose sanitized name matches the PVE key
     my $pg_resp = eval {
       purestorage_api_list(
@@ -1830,12 +1833,12 @@ sub purestorage_sync_array_snapshots {
   my $fetch_incomplete = 0;
   my @snaps;
   my @vol_names  = keys %vol_map;
-  my $chunk_size = 50;    # keep source_names query string length bounded
-  for ( my $i = 0; $i < @vol_names; $i += $chunk_size ) {
+  my $chunk_size = 50;              # keep source_names query string length bounded
+  for ( my $i = 0 ; $i < @vol_names ; $i += $chunk_size ) {
     my $end = $i + $chunk_size - 1;
     $end = $#vol_names if $end > $#vol_names;
     my @chunk = @vol_names[ $i .. $end ];
-    my $r = eval {
+    my $r     = eval {
       purestorage_api_list(
         $scfg,
         {
@@ -1919,10 +1922,10 @@ sub purestorage_sync_array_snapshots {
       }
       push @groups,
         {
-        pve_name    => $pve_name,
-        parent      => $parent,
-        snaptime    => $snaptime,
-        description => join( '; ', @parts ),
+          pve_name    => $pve_name,
+          parent      => $parent,
+          snaptime    => $snaptime,
+          description => join( '; ', @parts ),
         };
     }
 
@@ -1937,8 +1940,8 @@ sub purestorage_sync_array_snapshots {
           my $changed = 0;
 
           for my $g ( @groups ) {
-            my $pve_name  = $g->{ pve_name };
-            my $want_desc = $g->{ description } // '';
+            my $pve_name   = $g->{ pve_name };
+            my $want_desc  = $g->{ description } // '';
             my $final_name = $pve_name;
 
             if ( exists $psnaps->{ $pve_name } ) {
@@ -2203,7 +2206,9 @@ sub status {
     close $fh;
   }
   if ( time() - $last >= 30 ) {
-    eval { run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } ) };
+    eval {
+      run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
+    };
     $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
     my $tmp = "$ts_file.tmp.$$";
     if ( open my $out, '>', $tmp ) {
@@ -2413,9 +2418,7 @@ sub volume_snapshot_delete {
 
   if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
     $fatal->(
-      "Snapshot \"$snap\" is an imported Pure protection-group snapshot; "
-        . "delete it from the Pure array (protection group), not from Proxmox.",
-      $scfg
+      "Snapshot \"$snap\" is an imported Pure protection-group snapshot; " . "delete it from the Pure array (protection group), not from Proxmox.", $scfg
     );
   }
 
