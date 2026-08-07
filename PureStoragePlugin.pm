@@ -1789,7 +1789,7 @@ sub purestorage_sync_array_snapshots {
         method => 'GET',
         params => {
           filter => {
-            name      => [ map { purestorage_name( $scfg, $_ ) } split( ',', 'vm-*-disk-*,vm-*-cloudinit,vm-*-state-*' ) ],
+            name      => [ map { purestorage_name( $scfg, $_ ) } split( ',', 'vm-*-disk-*,vm-*-cloudinit' ) ],
             destroyed => 'false'
           }
         }
@@ -1807,15 +1807,34 @@ sub purestorage_sync_array_snapshots {
     my $name = $v->{ name } // '';
     next if $pref_len && index( $name, $pref ) != 0;
     my $volname = $pref_len ? substr( $name, $pref_len ) : $name;
-    next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit|state-)/;
+    next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit)/;
     $vol_map{ $name } = { volname => $volname, vmid => $1 };
   }
   $logger->( P_DEBUG, "purestorage_sync [$storeid]: " . scalar( keys %vol_map ) . " PVE volumes found", $scfg );
   return unless %vol_map;
 
+  # Skip volumes owned by LXC containers (this plugin also serves "rootdir"
+  # content) - only QEMU VM configs are synced here.
+  my %vmid_is_qemu;
+  for my $name ( keys %vol_map ) {
+    my $vmid = $vol_map{ $name }{ vmid };
+    next if exists $vmid_is_qemu{ $vmid };
+    my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
+    $vmid_is_qemu{ $vmid } = ( !$@ && ref( $conf ) eq 'HASH' ) ? 1 : 0;
+  }
+  for my $name ( keys %vol_map ) {
+    delete $vol_map{ $name } unless $vmid_is_qemu{ $vol_map{ $name }{ vmid } };
+  }
+  return unless %vol_map;
+
   my $fetch_incomplete = 0;
   my @snaps;
-  for my $full_name ( keys %vol_map ) {
+  my @vol_names  = keys %vol_map;
+  my $chunk_size = 50;    # keep source_names query string length bounded
+  for ( my $i = 0; $i < @vol_names; $i += $chunk_size ) {
+    my $end = $i + $chunk_size - 1;
+    $end = $#vol_names if $end > $#vol_names;
+    my @chunk = @vol_names[ $i .. $end ];
     my $r = eval {
       purestorage_api_list(
         $scfg,
@@ -1824,7 +1843,7 @@ sub purestorage_sync_array_snapshots {
           type   => 'volume-snapshots',
           method => 'GET',
           params => {
-            source_names => $full_name,
+            source_names => \@chunk,
             destroyed    => 'false'
           }
         },

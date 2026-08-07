@@ -46,7 +46,8 @@ providing high performance and reliability.
     names for rollback
   - Sync runs from storage `status()` about every 30 seconds (25s timeout);
     imported entries are read-only for delete in Proxmox — remove them on the
-    array. LXC/`rootdir` configs are not updated by this sync path.
+    array. LXC/`rootdir` volumes are detected and skipped outright (only
+    QEMU VM configs are synced).
 - Instant storage migration
   - The plugin will automatically map the iSCSI volumes needed on the
     host the VM is being migrated to

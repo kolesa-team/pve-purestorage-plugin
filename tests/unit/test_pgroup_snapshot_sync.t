@@ -2,7 +2,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 22;
+use Test::More tests => 31;
 
 # Standalone copies of PureStoragePlugin helpers (plugin requires PVE modules).
 
@@ -221,4 +221,44 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
     $final = $pve_name . '-' . $snaptime;
   }
   is( $final, 'pgroup-auto-277-1710000000', 'collision uses snaptime suffix' );
+}
+
+# --- volume discovery excludes ephemeral state volumes ---
+{
+  my $re = qr/^vm-(\d+)-(disk-|cloudinit)/;
+  ok( 'vm-100-disk-0' =~ $re,     'discovery matches disk volumes' );
+  ok( 'vm-100-cloudinit' =~ $re,  'discovery matches cloudinit volumes' );
+  ok( 'vm-100-state-mysnap' !~ $re,
+    'discovery no longer matches ephemeral state volumes (would permanently block completeness check)' );
+}
+
+# --- source_names chunking for batched snapshot fetch ---
+{
+  my @vol_names = map { "vm-100-disk-$_" } ( 1 .. 125 );
+  my $chunk_size = 50;
+  my @chunks;
+  for ( my $i = 0; $i < @vol_names; $i += $chunk_size ) {
+    my $end = $i + $chunk_size - 1;
+    $end = $#vol_names if $end > $#vol_names;
+    push @chunks, [ @vol_names[ $i .. $end ] ];
+  }
+  is( scalar @chunks, 3, 'chunks into 3 batches for 125 volumes at size 50' );
+  is( scalar @{ $chunks[0] }, 50, 'first chunk is full size' );
+  is( scalar @{ $chunks[2] }, 25, 'last chunk holds the remainder' );
+  my @flattened = map { @$_ } @chunks;
+  is_deeply( \@flattened, \@vol_names, 'chunking preserves all volumes in order' );
+}
+
+# --- LXC container vmids are filtered out of vol_map before syncing ---
+{
+  my %vol_map = (
+    'vm-100-disk-0' => { volname => 'vm-100-disk-0', vmid => 100 },    # QEMU
+    'vm-200-disk-0' => { volname => 'vm-200-disk-0', vmid => 200 },    # LXC container
+  );
+  my %vmid_is_qemu = ( 100 => 1, 200 => 0 );
+  for my $name ( keys %vol_map ) {
+    delete $vol_map{$name} unless $vmid_is_qemu{ $vol_map{$name}{vmid} };
+  }
+  ok( exists $vol_map{'vm-100-disk-0'}, 'QEMU vmid volume is kept' );
+  ok( !exists $vol_map{'vm-200-disk-0'}, 'LXC container vmid volume is dropped' );
 }
