@@ -125,8 +125,11 @@ sub api {
 # PVE 8.4: APIVER 11 e2dc01ac9f06fe37cf434bad9157a50ecc4a99ce / new_backup_provider/sensitive_properties; backup provider might be interesting, we can look at it later
 # PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
 # PVE 9:   APIVER 13 / hints parameters and on_update_hook_full
+# PVE 9:   APIVER 14 / get_identity (optional; we return FlashArray id)
+# PVE 9:   APIVER 15 / volume_resize($snapname); volume_snapshot_info virtual-size
+#          (snapshot-as-volume-chain N/A for this plugin; snap resize rejected)
 
-  my $tested_apiver = 13;
+  my $tested_apiver = 15;
 
   # Use () so this compiles under strict even when PVE::Storage is not loaded yet
   # (e.g. perl -c). At runtime PVE loads Storage before calling api().
@@ -2372,9 +2375,12 @@ sub deactivate_volume {
 }
 
 sub volume_resize {
-  my ( $class, $scfg, $storeid, $volname, $size, $running ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $size, $running, $snapname ) = @_;
   $logger->( P_DEBUG, "volume_resize",   $scfg );
   $logger->( P_DEBUG, "New Size: $size", $scfg );
+
+  # APIVER 15: snapshot resize is for snapshot-as-volume-chain backends only.
+  $fatal->( "resizing a snapshot is not supported for $class", $scfg ) if $snapname;
 
   return $class->purestorage_resize_volume( $scfg, $storeid, $volname, $size );
 }
@@ -2581,5 +2587,26 @@ sub on_update_hook_full {
   $logger->( P_DEBUG, "on_update_hook_full", $scfg );
 
   return;
+}
+
+# APIVER 14: stable backend identity independent of storage.cfg naming.
+sub get_identity {
+  my ( $class, $scfg, $storeid ) = @_;
+  $logger->( P_DEBUG, "get_identity", $scfg );
+
+  my $response = eval { purestorage_api_call( $scfg, { name => 'get array identity', type => 'arrays', method => 'GET', }, 0, $storeid ); };
+  $fatal->( "get_identity: failed to query Pure arrays: $@", $scfg ) if $@;
+
+  my $items = $response->{ items };
+  $fatal->( "get_identity: empty arrays response from Pure", $scfg )
+    unless ref( $items ) eq 'ARRAY' && @$items;
+
+  # Prefer array id; fall back to name. ActiveCluster secondary is ignored
+  # (purestorage_api_call returns the first successful array by default).
+  my $arr = $items->[0];
+  my $id  = $arr->{ id } // $arr->{ name };
+  $fatal->( "get_identity: Pure array entry missing id/name", $scfg ) unless length( $id // '' );
+
+  return "$id";
 }
 1;
