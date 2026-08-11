@@ -10,7 +10,7 @@ use File::Path ();
 
 use PVE::JSONSchema ();
 use PVE::Network    ();
-use PVE::Tools      qw( file_read_firstline run_command run_with_timeout );
+use PVE::Tools      qw( file_read_firstline run_command );
 use PVE::INotify    ();
 use PVE::SafeSyslog qw(syslog);
 use Sys::Syslog     qw(:macros);
@@ -128,8 +128,10 @@ sub api {
 
   my $tested_apiver = 13;
 
-  my $apiver = PVE::Storage::APIVER;
-  my $apiage = PVE::Storage::APIAGE;
+  # Use () so this compiles under strict even when PVE::Storage is not loaded yet
+  # (e.g. perl -c). At runtime PVE loads Storage before calling api().
+  my $apiver = PVE::Storage::APIVER();
+  my $apiage = PVE::Storage::APIAGE();
 
   # the plugin supports multiple PVE generations, currently we did not break anything, tell them what they want to hear if possible
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
@@ -2207,7 +2209,8 @@ sub status {
   }
   if ( time() - $last >= 30 ) {
     eval {
-      run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
+      # Not in PVE::Tools @EXPORT_OK — call fully qualified.
+      PVE::Tools::run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
     };
     $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
     my $tmp = "$ts_file.tmp.$$";
