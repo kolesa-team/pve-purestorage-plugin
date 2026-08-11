@@ -394,6 +394,27 @@ sub wait_for {
   $fatal->( "Timeout while waiting for $message", undef );
 }
 
+# Local alarm-based timeout (PVE::Tools::run_with_timeout is not in @EXPORT_OK).
+sub purestorage_run_with_timeout {
+  my ( $timeout, $code, @param ) = @_;
+  die "got timeout\n" if !defined($timeout) || $timeout <= 0;
+
+  my $prev_alarm = alarm 0;
+  my $res;
+  eval {
+    local $SIG{ALRM} = sub { die "got timeout\n" };
+    local $SIG{__DIE__};
+    alarm($timeout);
+    eval { $res = $code->(@param) };
+    alarm(0);
+    die $@ if $@;
+  };
+  my $err = $@;
+  alarm $prev_alarm;
+  die $err if $err;
+  return $res;
+}
+
 sub prepare_api_params {
   my ( $parms ) = @_;
   $logger->( P_VERB, "prepare_api_params", undef );
@@ -2209,8 +2230,7 @@ sub status {
   }
   if ( time() - $last >= 30 ) {
     eval {
-      # Not in PVE::Tools @EXPORT_OK — call fully qualified.
-      PVE::Tools::run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
+      purestorage_run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
     };
     $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
     my $tmp = "$ts_file.tmp.$$";
