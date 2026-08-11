@@ -397,16 +397,16 @@ sub wait_for {
 # Local alarm-based timeout (PVE::Tools::run_with_timeout is not in @EXPORT_OK).
 sub purestorage_run_with_timeout {
   my ( $timeout, $code, @param ) = @_;
-  die "got timeout\n" if !defined($timeout) || $timeout <= 0;
+  die "got timeout\n" if !defined( $timeout ) || $timeout <= 0;
 
   my $prev_alarm = alarm 0;
   my $res;
   eval {
-    local $SIG{ALRM} = sub { die "got timeout\n" };
-    local $SIG{__DIE__};
-    alarm($timeout);
-    eval { $res = $code->(@param) };
-    alarm(0);
+    local $SIG{ ALRM } = sub { die "got timeout\n" };
+    local $SIG{ __DIE__ };
+    alarm( $timeout );
+    eval { $res = $code->( @param ) };
+    alarm( 0 );
     die $@ if $@;
   };
   my $err = $@;
