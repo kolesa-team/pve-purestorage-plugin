@@ -44,10 +44,12 @@ providing high performance and reliability.
     (e.g. `pgroup-auto-277`)
   - The snapshot description keeps the exact Pure parent and per-disk member
     names for rollback
-  - Sync runs from storage `status()` about every 30 seconds (25s timeout);
-    imported entries are read-only for delete in Proxmox — remove them on the
+  - Opt-in via `pgroup_sync` (default off). When enabled, sync is forked from
+    storage `status()` on a configurable interval (`pgroup_sync_interval`,
+    default 60s, minimum 30s) so pvestatd is not blocked
+  - Imported entries are read-only for delete in Proxmox — remove them on the
     array. LXC/`rootdir` volumes are detected and skipped outright (only
-    QEMU VM configs are synced).
+    QEMU VM configs are synced)
 - Instant storage migration
   - The plugin will automatically map the iSCSI volumes needed on the
     host the VM is being migrated to
@@ -293,6 +295,8 @@ purestorage: <storage_id>
 | check_ssl | (`optional`, default is `no`) Verify the server's TLS certificate. Set to `yes` to enable SSL certificate verification. |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
 | debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Environment variable `PURESTORAGE_DEBUG` can be used as fallback when `debug` is not set in config. |
+| pgroup_sync | (`optional`, default is `no`) Import Pure protection-group snapshots into QEMU VM snapshot trees. Runs in a background process forked from storage status polls. |
+| pgroup_sync_interval | (`optional`, default is `60`) Minimum seconds between protection-group snapshot sync runs (minimum 30). |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are
 > kept secure and not exposed publicly.

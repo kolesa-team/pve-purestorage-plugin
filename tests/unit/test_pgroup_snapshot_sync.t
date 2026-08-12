@@ -2,7 +2,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 31;
+use Test::More tests => 43;
 
 # Standalone copies of PureStoragePlugin helpers (plugin requires PVE modules).
 
@@ -47,6 +47,34 @@ sub purestorage_pg_description_parent {
   my ( $description ) = @_;
   return undef unless defined $description && $description =~ /^PG:\s*([^\s;]+)/;
   return $1;
+}
+
+sub purestorage_pg_description_members {
+  my ( $description ) = @_;
+  my %members;
+  return \%members unless defined $description && $description =~ /^PG:/;
+  while ( $description =~ /;\s*([^:;]+):\s*([^;]+)/g ) {
+    my ( $vol, $snap ) = ( $1, $2 );
+    $vol  =~ s/^\s+|\s+$//g;
+    $snap =~ s/^\s+|\s+$//g;
+    $members{ $vol } = $snap if length( $vol ) && length( $snap );
+  }
+  return \%members;
+}
+
+sub purestorage_snapshot_entry_from_conf {
+  my ( $conf, $snaptime, $description ) = @_;
+  my $entry = {
+    snaptime    => $snaptime,
+    description => $description,
+  };
+  my %skip = map { $_ => 1 } qw(snapshots snapstate lock pending description parent digest meta);
+  for my $k ( keys %$conf ) {
+    next if $skip{ $k };
+    next if ref( $conf->{ $k } );
+    $entry->{ $k } = $conf->{ $k };
+  }
+  return $entry;
 }
 
 # --- sanitize ---
@@ -117,30 +145,37 @@ is( purestorage_pg_description_parent('PG: pgroup-auto.277; vol: snap'),
   'pgroup-auto.277', 'parse PG parent from description' );
 is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' );
 
-# --- completeness grouping ---
+# --- historical completeness (member set from snap, not current VM disks) ---
 {
-  my %vol_map = (
-    'vm-100-disk-0' => { vmid => 100 },
-    'vm-100-disk-1' => { vmid => 100 },
-  );
-  my @vm_vols = sort keys %vol_map;
-  my %members_ok = (
+  my %members_historical = (
     'vm-100-disk-0' => 'pgroup-auto.277.vm-100-disk-0',
     'vm-100-disk-1' => 'pgroup-auto.277.vm-100-disk-1',
   );
-  my %members_bad = ( 'vm-100-disk-0' => 'pgroup-auto.277.vm-100-disk-0' );
+  my %current_vols = (
+    'vm-100-disk-0'   => 1,
+    'vm-100-disk-1'   => 1,
+    'vm-100-cloudinit' => 1,    # added after the snapshot
+  );
 
-  my $ok = 1;
-  for my $fvn (@vm_vols) {
-    unless ( exists $members_ok{$fvn} ) { $ok = 0; last; }
+  # Old (buggy) check: require every current vol in members
+  my $old_ok = 1;
+  for my $fvn ( keys %current_vols ) {
+    unless ( exists $members_historical{ $fvn } ) { $old_ok = 0; last; }
   }
-  ok( $ok, 'complete multi-disk group accepted' );
+  ok( !$old_ok, 'old completeness rejects snap after cloudinit added' );
 
-  $ok = 1;
-  for my $fvn (@vm_vols) {
-    unless ( exists $members_bad{$fvn} ) { $ok = 0; last; }
-  }
-  ok( !$ok, 'incomplete multi-disk group rejected' );
+  # New check: non-empty historical member set is enough
+  ok( keys %members_historical, 'historical completeness accepts non-empty member set' );
+}
+
+# --- description members parse ---
+{
+  my $desc =
+    'PG: pgroup-auto.277; vm-100-disk-0: pgroup-auto.277.vm-100-disk-0; vm-100-disk-1: pgroup-auto.277.vm-100-disk-1';
+  my $m = purestorage_pg_description_members($desc);
+  is( $m->{'vm-100-disk-0'}, 'pgroup-auto.277.vm-100-disk-0', 'member disk-0 from description' );
+  is( $m->{'vm-100-disk-1'}, 'pgroup-auto.277.vm-100-disk-1', 'member disk-1 from description' );
+  is( scalar keys %$m, 2, 'two members parsed' );
 }
 
 # --- ownership prune scoping ---
@@ -149,17 +184,18 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
     'PG: pgroup-auto.277; vm-100-disk-0: pgroup-auto.277.vm-100-disk-0';
   my $desc_other =
     'PG: pgroup-auto.277; otherstore-vm-100-disk-0: pgroup-auto.277.otherstore-vm-100-disk-0';
-  my @vm_vols = ('vm-100-disk-0');
+  my %vol_map = ( 'vm-100-disk-0' => { vmid => 100 } );
+  my $vmid    = 100;
 
   my $ours = 0;
-  for my $fvn (@vm_vols) {
-    if ( $desc_ours =~ /(?:^|;\s*)\Q$fvn\E:/ ) { $ours = 1; last; }
+  for my $fvn ( keys %{ purestorage_pg_description_members($desc_ours) } ) {
+    if ( exists $vol_map{$fvn} && $vol_map{$fvn}{vmid} eq $vmid ) { $ours = 1; last; }
   }
   ok( $ours, 'prune ownership matches our volume' );
 
   $ours = 0;
-  for my $fvn (@vm_vols) {
-    if ( $desc_other =~ /(?:^|;\s*)\Q$fvn\E:/ ) { $ours = 1; last; }
+  for my $fvn ( keys %{ purestorage_pg_description_members($desc_other) } ) {
+    if ( exists $vol_map{$fvn} && $vol_map{$fvn}{vmid} eq $vmid ) { $ours = 1; last; }
   }
   ok( !$ours, 'prune ownership ignores other storage volumes' );
 }
@@ -175,6 +211,25 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
     $member =~ s/^\s+|\s+$//g;
   }
   is( $member, 'pgroup-auto.277.vm-100-disk-0', 'resolve member from description' );
+}
+
+# --- snapshot entry must not clobber description/parent with VM notes ---
+{
+  my $conf = {
+    name        => 'testvm',
+    memory      => 1024,
+    description => 'VM Notes from GUI',
+    parent      => 'some-user-snap',
+    snapshots   => {},
+    lock        => 'migrate',
+  };
+  my $want = 'PG: pgroup-auto.277; vm-100-disk-0: pgroup-auto.277.vm-100-disk-0';
+  my $entry = purestorage_snapshot_entry_from_conf( $conf, 1710000000, $want );
+  is( $entry->{description}, $want, 'PG description preserved despite VM notes' );
+  ok( !exists $entry->{parent}, 'parent not copied into imported snapshot entry' );
+  is( $entry->{memory}, 1024, 'machine keys still copied' );
+  ok( !exists $entry->{snapshots}, 'snapshots hash not copied' );
+  ok( !exists $entry->{lock},      'lock not copied' );
 }
 
 # --- pagination token merge simulation ---
@@ -198,6 +253,17 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
   is( $items[2]{name}, 'c', 'page3 item' );
 }
 
+# --- pagination truncation flag ---
+{
+  my $pages     = 10000;
+  my $token     = 'still-more';
+  my $truncated = 0;
+  if ( $pages >= 10000 && length($token) ) {
+    $truncated = 1;
+  }
+  ok( $truncated, 'page cap with remaining token marks truncated' );
+}
+
 # --- x-next-token fallback ---
 {
   my $content = { items => [] };
@@ -208,41 +274,56 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
   is( $content->{continuation_token}, 'abc123', 'x-next-token fills continuation_token' );
 }
 
-# --- PVE name collision fallback ---
+# --- PVE name collision fallback + keep registration order ---
 {
-  my $pve_name  = 'pgroup-auto-277';
-  my $snaptime  = 1710000000;
-  my %psnaps    = ( $pve_name => { description => 'user snap' } );
-  my $final     = $pve_name;
-  my $cur       = $psnaps{$pve_name}{description};
-  my $ours      = defined( purestorage_pg_description_parent($cur) ) || $cur eq '';
+  my $pve_name = 'pgroup-auto-277';
+  my $snaptime = 1710000000;
+  my %psnaps   = ( $pve_name => { description => 'user snap' } );
+  my %keep     = ( $pve_name => 1 );
+  my $final    = $pve_name;
+  my $cur      = $psnaps{$pve_name}{description};
+  my $ours     = defined( purestorage_pg_description_parent($cur) ) || $cur eq '';
   ok( !$ours, 'user snap is not PG-imported' );
   if ( !$ours ) {
     $final = $pve_name . '-' . $snaptime;
+    $keep{$final} = 1;    # must happen even when entry already exists
   }
   is( $final, 'pgroup-auto-277-1710000000', 'collision uses snaptime suffix' );
+  ok( $keep{$final}, 'fallback name stays in keep set across cycles' );
+}
+
+# --- empty by_vmid still allows prune over discovered vmids ---
+{
+  my %vol_map = (
+    'vm-100-disk-0' => { vmid => 100 },
+    'vm-101-disk-0' => { vmid => 101 },
+  );
+  my %by_vmid;    # no live pgroup snaps
+  my %vmids_to_touch = map { $vol_map{$_}{vmid} => 1 } keys %vol_map;
+  ok( !%by_vmid, 'no live groups' );
+  is( scalar keys %vmids_to_touch, 2, 'prune still walks discovered vmids' );
 }
 
 # --- volume discovery excludes ephemeral state volumes ---
 {
   my $re = qr/^vm-(\d+)-(disk-|cloudinit)/;
-  ok( 'vm-100-disk-0' =~ $re,     'discovery matches disk volumes' );
-  ok( 'vm-100-cloudinit' =~ $re,  'discovery matches cloudinit volumes' );
+  ok( 'vm-100-disk-0' =~ $re,    'discovery matches disk volumes' );
+  ok( 'vm-100-cloudinit' =~ $re, 'discovery matches cloudinit volumes' );
   ok( 'vm-100-state-mysnap' !~ $re,
     'discovery no longer matches ephemeral state volumes (would permanently block completeness check)' );
 }
 
 # --- source_names chunking for batched snapshot fetch ---
 {
-  my @vol_names = map { "vm-100-disk-$_" } ( 1 .. 125 );
+  my @vol_names  = map { "vm-100-disk-$_" } ( 1 .. 125 );
   my $chunk_size = 50;
   my @chunks;
-  for ( my $i = 0; $i < @vol_names; $i += $chunk_size ) {
+  for ( my $i = 0 ; $i < @vol_names ; $i += $chunk_size ) {
     my $end = $i + $chunk_size - 1;
     $end = $#vol_names if $end > $#vol_names;
     push @chunks, [ @vol_names[ $i .. $end ] ];
   }
-  is( scalar @chunks, 3, 'chunks into 3 batches for 125 volumes at size 50' );
+  is( scalar @chunks,         3,  'chunks into 3 batches for 125 volumes at size 50' );
   is( scalar @{ $chunks[0] }, 50, 'first chunk is full size' );
   is( scalar @{ $chunks[2] }, 25, 'last chunk holds the remainder' );
   my @flattened = map { @$_ } @chunks;
@@ -259,6 +340,6 @@ is( purestorage_pg_description_parent('user note'), undef, 'non-PG description' 
   for my $name ( keys %vol_map ) {
     delete $vol_map{$name} unless $vmid_is_qemu{ $vol_map{$name}{vmid} };
   }
-  ok( exists $vol_map{'vm-100-disk-0'}, 'QEMU vmid volume is kept' );
+  ok( exists $vol_map{'vm-100-disk-0'},  'QEMU vmid volume is kept' );
   ok( !exists $vol_map{'vm-200-disk-0'}, 'LXC container vmid volume is dropped' );
 }

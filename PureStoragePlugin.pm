@@ -23,6 +23,8 @@ use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
+use Fcntl          qw( :flock );
+use POSIX          qw( _exit );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -206,6 +208,17 @@ sub properties {
       maximum     => 3,
       default     => 0
     },
+    pgroup_sync => {
+      description => "Import Pure protection-group snapshots into QEMU VM snapshot trees (background; default off).",
+      type        => 'boolean',
+      default     => 'no'
+    },
+    pgroup_sync_interval => {
+      description => "Minimum seconds between protection-group snapshot sync runs (minimum 30).",
+      type        => 'integer',
+      minimum     => 30,
+      default     => 60
+    },
   };
 }
 
@@ -214,18 +227,20 @@ sub options {
     address => { fixed => 1 },
     token   => { fixed => 1 },
 
-    hgsuffix  => { optional => 1 },
-    vgname    => { optional => 1 },
-    podname   => { optional => 1 },
-    vnprefix  => { optional => 1 },
-    check_ssl => { optional => 1 },
-    protocol  => { optional => 1 },
-    token_ttl => { optional => 1 },
-    debug     => { optional => 1 },
-    nodes     => { optional => 1 },
-    disable   => { optional => 1 },
-    content   => { optional => 1 },
-    format    => { optional => 1 },
+    hgsuffix             => { optional => 1 },
+    vgname               => { optional => 1 },
+    podname              => { optional => 1 },
+    vnprefix             => { optional => 1 },
+    check_ssl            => { optional => 1 },
+    protocol             => { optional => 1 },
+    token_ttl            => { optional => 1 },
+    debug                => { optional => 1 },
+    pgroup_sync          => { optional => 1 },
+    pgroup_sync_interval => { optional => 1 },
+    nodes                => { optional => 1 },
+    disable              => { optional => 1 },
+    content              => { optional => 1 },
+    format               => { optional => 1 },
   };
 }
 
@@ -959,7 +974,7 @@ sub try_cached_token {
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_api_call {
-  my ( $scfg, $action, $all, $storeid ) = @_;
+  my ( $scfg, $action, $all, $storeid, $array_index ) = @_;
   $logger->( P_TRACE, "purestorage_api_call", $scfg );
 
   $all //= 0;
@@ -993,10 +1008,13 @@ sub purestorage_api_call {
   my $last_success_error = ERROR_SUCCESS;
   my $last_success_content;
 
-  foreach my $i ( 0, 1 ) {
+  # Optional $array_index pins the call to one configured array (e.g. get_identity).
+  my @try_indices = defined( $array_index ) ? ( $array_index ) : ( 0, 1 );
+
+  foreach my $i ( @try_indices ) {
     $url = $urls[$i] // '';
     my $token = $tokens[$i] // '';
-    next if $i && $url eq '' && $token eq '';
+    next if !defined( $array_index ) && $i && $url eq '' && $token eq '';
 
     $array_count++;
 
@@ -1223,7 +1241,8 @@ sub purestorage_api_list {
 
   my @items;
   my $token;
-  my $pages = 0;
+  my $pages     = 0;
+  my $truncated = 0;
   while ( 1 ) {
     delete $params{ continuation_token };
     $params{ continuation_token } = $token if length( $token // '' );
@@ -1233,10 +1252,21 @@ sub purestorage_api_list {
 
     $token = $response->{ continuation_token };
     last unless length( $token // '' );
-    last if ++$pages >= 10000;    # safety against runaway pagination
+    if ( ++$pages >= 10000 ) {    # safety against runaway pagination
+      $truncated = 1;
+      $logger->(
+        P_WARN,
+        "purestorage_api_list [$storeid]: truncated after 10000 pages"
+          . " (action="
+          . ( $action{ name } // $action{ type } // '?' )
+          . "); results may be incomplete",
+        $scfg
+      );
+      last;
+    }
   }
 
-  return { items => \@items };
+  return { items => \@items, truncated => $truncated };
 }
 
 sub purestorage_list_volumes {
@@ -1704,6 +1734,36 @@ sub purestorage_pg_description_parent {
   return $1;
 }
 
+# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }.
+sub purestorage_pg_description_members {
+  my ( $description ) = @_;
+  my %members;
+  return \%members unless defined $description && $description =~ /^PG:/;
+  while ( $description =~ /;\s*([^:;]+):\s*([^;]+)/g ) {
+    my ( $vol, $snap ) = ( $1, $2 );
+    $vol  =~ s/^\s+|\s+$//g;
+    $snap =~ s/^\s+|\s+$//g;
+    $members{ $vol } = $snap if length( $vol ) && length( $snap );
+  }
+  return \%members;
+}
+
+# Build a PVE snapshot config entry without clobbering description/parent.
+sub purestorage_snapshot_entry_from_conf {
+  my ( $conf, $snaptime, $description ) = @_;
+  my $entry = {
+    snaptime    => $snaptime,
+    description => $description,
+  };
+  my %skip = map { $_ => 1 } qw(snapshots snapstate lock pending description parent digest meta);
+  for my $k ( keys %$conf ) {
+    next if $skip{ $k };
+    next if ref( $conf->{ $k } );
+    $entry->{ $k } = $conf->{ $k };
+  }
+  return $entry;
+}
+
 sub purestorage_vm_snap_description {
   my ( $vmid, $snap ) = @_;
   return undef unless defined $vmid && length( $snap // '' );
@@ -1799,6 +1859,58 @@ sub purestorage_resolve_imported_snap {
   return undef;
 }
 
+# Schedule pgroup sync outside status(): non-blocking lock + fork so pvestatd is not stalled.
+sub purestorage_maybe_schedule_pgroup_sync {
+  my ( $scfg, $storeid ) = @_;
+  return unless $scfg->{ pgroup_sync };
+
+  my $interval = $scfg->{ pgroup_sync_interval } // 60;
+  $interval = 30 if $interval < 30;
+
+  my $ts_file   = "/var/run/pve-pure-sync-${storeid}.ts";
+  my $lock_file = "/var/run/pve-pure-sync-${storeid}.lock";
+
+  open( my $lf, '>>', $lock_file ) or return;
+  flock( $lf, LOCK_EX | LOCK_NB )  or do { close $lf; return; };
+
+  my $last = 0;
+  if ( open my $fh, '<', $ts_file ) {
+    $last = <$fh> // 0;
+    chomp $last;
+    close $fh;
+  }
+  if ( time() - $last < $interval ) {
+    close $lf;
+    return;
+  }
+
+  # Claim this interval under the lock before forking.
+  my $tmp = "$ts_file.tmp.$$";
+  if ( open my $out, '>', $tmp ) {
+    print $out time();
+    close $out;
+    rename $tmp, $ts_file;
+  }
+
+  my $pid = fork();
+  if ( !defined $pid ) {
+    $logger->( P_WARN, "Pure snapshot sync: fork failed: $!", $scfg );
+    close $lf;
+    return;
+  }
+  if ( $pid == 0 ) {
+    close $lf;
+    eval {
+      purestorage_run_with_timeout( 120, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
+    };
+    $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
+    _exit( 0 );
+  }
+
+  close $lf;
+  return;
+}
+
 # Import protection-group snapshots into QEMU VM configs (Nimble-style sync).
 sub purestorage_sync_array_snapshots {
   my ( $scfg, $storeid ) = @_;
@@ -1830,6 +1942,7 @@ sub purestorage_sync_array_snapshots {
     $logger->( P_WARN, "purestorage_sync [$storeid]: volume list failed; skipping sync", $scfg );
     return;
   }
+  my $fetch_incomplete = $vol_resp->{ truncated } ? 1 : 0;
 
   my %vol_map;    # full_pure_name => { volname, vmid }
   for my $v ( @{ $vol_resp->{ items } } ) {
@@ -1856,7 +1969,6 @@ sub purestorage_sync_array_snapshots {
   }
   return unless %vol_map;
 
-  my $fetch_incomplete = 0;
   my @snaps;
   my @vol_names  = keys %vol_map;
   my $chunk_size = 50;              # keep source_names query string length bounded
@@ -1883,6 +1995,7 @@ sub purestorage_sync_array_snapshots {
       $fetch_incomplete = 1;
       next;
     }
+    $fetch_incomplete = 1 if $r->{ truncated };
     push @snaps, @{ $r->{ items } };
   }
 
@@ -1902,6 +2015,7 @@ sub purestorage_sync_array_snapshots {
   if ( !$pg_resp || ref( $pg_resp->{ items } ) ne 'ARRAY' ) {
     $fetch_incomplete = 1;
   } else {
+    $fetch_incomplete = 1 if $pg_resp->{ truncated };
     for my $pg ( @{ $pg_resp->{ items } } ) {
       my $pname = $pg->{ name } // '';
       next unless length( $pname );
@@ -1909,7 +2023,7 @@ sub purestorage_sync_array_snapshots {
     }
   }
 
-  # vmid => parent => { full_vol => member_snap_name, ... } plus created
+  # vmid => parent => { full_vol => member_snap_name, ... }
   my %by_vmid;
   for my $s ( @snaps ) {
     my $source = ref( $s->{ source } ) eq 'HASH' ? ( $s->{ source }{ name } // '' ) : '';
@@ -1922,19 +2036,21 @@ sub purestorage_sync_array_snapshots {
     my $vmid = $vol_map{ $source }{ vmid };
     $by_vmid{ $vmid }{ $parent }{ $source } = $s->{ name } // ( $parent . '.' . $source );
   }
-  return unless %by_vmid;
 
-  for my $vmid ( sort keys %by_vmid ) {
-    my @vm_vols = sort grep { $vol_map{ $_ }{ vmid } eq $vmid } keys %vol_map;
+  # Always touch every discovered QEMU vmid so prune still runs when the array
+  # no longer has any complete/live pgroup snapshots for them.
+  my %vmids_to_touch = map { $vol_map{ $_ }{ vmid } => 1 } keys %vol_map;
+
+  for my $vmid ( sort { $a <=> $b } keys %vmids_to_touch ) {
     my @groups;
 
-    for my $parent ( sort keys %{ $by_vmid{ $vmid } } ) {
+    for my $parent ( sort keys %{ $by_vmid{ $vmid } // {} } ) {
       my $members = $by_vmid{ $vmid }{ $parent };
-      my $ok      = 1;
-      for my $fvn ( @vm_vols ) {
-        unless ( exists $members->{ $fvn } ) { $ok = 0; last; }
-      }
-      next unless $ok;
+
+      # Historical completeness: accept any non-empty member set from the
+      # snapshot itself. Do not require every *current* VM volume (e.g. a
+      # cloudinit disk added later) to be present in past pgroup snaps.
+      next unless $members && keys %$members;
 
       my $pve_name = purestorage_pve_snapname_from_parent( $parent );
       next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
@@ -1943,7 +2059,7 @@ sub purestorage_sync_array_snapshots {
       my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
 
       my @parts = ( "PG: $parent" );
-      for my $fvn ( @vm_vols ) {
+      for my $fvn ( sort keys %$members ) {
         push @parts, "$fvn: $members->{$fvn}";
       }
       push @groups,
@@ -1988,19 +2104,14 @@ sub purestorage_sync_array_snapshots {
                 next;
               }
 
-              # Name taken by a non-imported snap — unique fallback
+              # Name taken by a non-imported snap — unique fallback.
+              # Register keep before next so later cycles do not prune/recreate.
               $final_name = $pve_name . '-' . $g->{ snaptime };
-              next if exists $psnaps->{ $final_name };
               $keep{ $final_name } = 1;
+              next if exists $psnaps->{ $final_name };
             }
 
-            my $entry = { snaptime => $g->{ snaptime }, description => $want_desc };
-            for my $k ( keys %$conf ) {
-              next if $k eq 'snapshots' || $k eq 'snapstate' || $k eq 'lock' || $k eq 'pending';
-              next if ref( $conf->{ $k } );
-              $entry->{ $k } = $conf->{ $k };
-            }
-            $psnaps->{ $final_name } = $entry;
+            $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $g->{ snaptime }, $want_desc );
             $changed = 1;
           }
 
@@ -2010,9 +2121,21 @@ sub purestorage_sync_array_snapshots {
               my $desc = $psnaps->{ $sname }{ description };
               $desc = defined $desc ? "$desc" : '';
               next unless defined( purestorage_pg_description_parent( $desc ) );
-              my $ours = 0;
-              for my $fvn ( @vm_vols ) {
-                if ( $desc =~ /(?:^|;\s*)\Q$fvn\E:/ ) { $ours = 1; last; }
+
+              # Ours if the stored member list names any volume for this vmid
+              # on this storage (current or removed since import).
+              my $members = purestorage_pg_description_members( $desc );
+              my $ours    = 0;
+              for my $fvn ( keys %$members ) {
+                if ( exists $vol_map{ $fvn } && $vol_map{ $fvn }{ vmid } eq $vmid ) {
+                  $ours = 1;
+                  last;
+                }
+                my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
+                if ( $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/ ) {
+                  $ours = 1;
+                  last;
+                }
               }
               next unless $ours;
               delete $psnaps->{ $sname };
@@ -2222,27 +2345,9 @@ sub status {
   # Mark storage as active
   my $active = 1;
 
-  # Periodic import of protection-group snapshots into PVE VM configs (throttled to 30s).
-  # Timestamp is always updated after each attempt so failures/timeouts do not hammer the array.
-  my $ts_file = "/var/run/pve-pure-sync-${storeid}.ts";
-  my $last    = 0;
-  if ( open my $fh, '<', $ts_file ) {
-    $last = <$fh> // 0;
-    chomp $last;
-    close $fh;
-  }
-  if ( time() - $last >= 30 ) {
-    eval {
-      purestorage_run_with_timeout( 25, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
-    };
-    $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
-    my $tmp = "$ts_file.tmp.$$";
-    if ( open my $out, '>', $tmp ) {
-      print $out time();
-      close $out;
-      rename $tmp, $ts_file;
-    }
-  }
+  # Optional background import of protection-group snapshots (see pgroup_sync).
+  # Forked off status() so pvestatd / GUI storage polls are not blocked.
+  purestorage_maybe_schedule_pgroup_sync( $scfg, $storeid );
 
   # Return total, free, used space and the active status
   return ( $total, $free, $used, $active );
@@ -2590,19 +2695,29 @@ sub on_update_hook_full {
 }
 
 # APIVER 14: stable backend identity independent of storage.cfg naming.
+# Pin to the first configured array so ActiveCluster failover cannot change the id.
 sub get_identity {
   my ( $class, $scfg, $storeid ) = @_;
   $logger->( P_DEBUG, "get_identity", $scfg );
 
-  my $response = eval { purestorage_api_call( $scfg, { name => 'get array identity', type => 'arrays', method => 'GET', }, 0, $storeid ); };
-  $fatal->( "get_identity: failed to query Pure arrays: $@", $scfg ) if $@;
+  my $response = eval {
+    purestorage_api_call(
+      $scfg,
+      {
+        name   => 'get array identity',
+        type   => 'arrays',
+        method => 'GET',
+      },
+      0, $storeid,
+      0    # first configured array only
+    );
+  };
+  $fatal->( "get_identity: failed to query first configured Pure array: $@", $scfg ) if $@;
 
   my $items = $response->{ items };
   $fatal->( "get_identity: empty arrays response from Pure", $scfg )
     unless ref( $items ) eq 'ARRAY' && @$items;
 
-  # Prefer array id; fall back to name. ActiveCluster secondary is ignored
-  # (purestorage_api_call returns the first successful array by default).
   my $arr = $items->[0];
   my $id  = $arr->{ id } // $arr->{ name };
   $fatal->( "get_identity: Pure array entry missing id/name", $scfg ) unless length( $id // '' );
