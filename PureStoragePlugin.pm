@@ -1899,15 +1899,18 @@ sub purestorage_maybe_schedule_pgroup_sync {
     return;
   }
   if ( $pid == 0 ) {
-    close $lf;
+
+    # Keep $lf open so the lock is held for the duration of the sync; parent
+    # closes its copy below. Another status() tick will then fail LOCK_NB.
     eval {
       purestorage_run_with_timeout( 120, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
     };
     $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
+    close $lf;
     _exit( 0 );
   }
 
-  close $lf;
+  close $lf;    # child's inherited FD still holds the exclusive lock
   return;
 }
 
