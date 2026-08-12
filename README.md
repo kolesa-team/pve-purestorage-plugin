@@ -19,6 +19,7 @@ providing high performance and reliability.
   - [Manual Installation](#manual-installation)
   - [Debian Package Installation (Recommended)](#debian-package-installation-recommended)
 - [Configuration](#configuration)
+  - [Protection-group snapshot sync](#protection-group-snapshot-sync)
 - [Troubleshooting](#troubleshooting)
   - [Debug Logging](#debug-logging)
   - [Service Status](#service-status)
@@ -295,8 +296,8 @@ purestorage: <storage_id>
 | check_ssl | (`optional`, default is `no`) Verify the server's TLS certificate. Set to `yes` to enable SSL certificate verification. |
 | token_ttl | (`optional`, default is `3600`) Session token time-to-live in seconds. The plugin caches PureStorage API session tokens in `/etc/pve/priv/purestorage/` (automatically replicated across cluster nodes). Tokens are proactively refreshed at 80% of TTL to prevent expiration during operations. |
 | debug | (`optional`, default is `0`) Enable debug logging. Levels: 0=off, 1=basic (token operations, main calls), 2=verbose (HTTP details, validation), 3=trace (all internals). Environment variable `PURESTORAGE_DEBUG` can be used as fallback when `debug` is not set in config. |
-| pgroup_sync | (`optional`, default is `no`) Import Pure protection-group snapshots into QEMU VM snapshot trees. Runs in a background process forked from storage status polls. |
-| pgroup_sync_interval | (`optional`, default is `60`) Minimum seconds between protection-group snapshot sync runs (minimum 30). |
+| pgroup_sync | (`optional`, default is `no`) Import Pure protection-group snapshots into QEMU VM snapshot trees. Off by default. See [Protection-group snapshot sync](#protection-group-snapshot-sync). |
+| pgroup_sync_interval | (`optional`, default is `60`) Minimum seconds between protection-group snapshot sync runs (minimum 30). Only used when `pgroup_sync` is enabled. |
 
 > **_NOTE:_** Ensure that the token and other sensitive information are
 > kept secure and not exposed publicly.
@@ -342,6 +343,39 @@ purestorage: pure-lxc
 > on both arrays. This ensures high availability - if one array fails,
 > volumes remain accessible through the other array. The plugin handles
 > connection management on all arrays transparently.
+
+### Protection-group snapshot sync
+
+Pure protection-group snapshots (for example `pgroup-auto.277`) are **not**
+imported into the Proxmox VM snapshot tree unless you turn this on. The
+feature is QEMU-only; LXC/`rootdir` volumes are skipped.
+
+Enable it on a storage:
+
+```text
+pvesm set <storage_id> --pgroup_sync 1
+```
+
+Optional interval (seconds, minimum 30, default 60):
+
+```text
+pvesm set <storage_id> --pgroup_sync_interval 60
+```
+
+Or in `/etc/pve/storage.cfg`:
+
+```text
+purestorage: pure
+  address https://purestorage.example.com
+  token abc123
+  vgname pure_vg
+  content images
+  pgroup_sync 1
+  pgroup_sync_interval 60
+```
+
+Imported names replace `.` with `-` (for example `pgroup-auto-277`). Delete
+those snapshots on the Pure protection group, not from the Proxmox UI.
 
 ## Troubleshooting
 
