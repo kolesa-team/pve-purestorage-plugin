@@ -23,6 +23,8 @@ use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
+use Fcntl          qw( :flock );
+use POSIX          qw( _exit );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -125,11 +127,16 @@ sub api {
 # PVE 8.4: APIVER 11 e2dc01ac9f06fe37cf434bad9157a50ecc4a99ce / new_backup_provider/sensitive_properties; backup provider might be interesting, we can look at it later
 # PVE 9:   APIVER 12 280bb6be777abdccd89b1b1d7bdd4feaba9af4c2 / qemu_blockdev_options/rename_snapshot/get_formats
 # PVE 9:   APIVER 13 / hints parameters and on_update_hook_full
+# PVE 9:   APIVER 14 / get_identity (optional; we return FlashArray id)
+# PVE 9:   APIVER 15 / volume_resize($snapname); volume_snapshot_info virtual-size
+#          (snapshot-as-volume-chain N/A for this plugin; snap resize rejected)
 
-  my $tested_apiver = 13;
+  my $tested_apiver = 15;
 
-  my $apiver = PVE::Storage::APIVER;
-  my $apiage = PVE::Storage::APIAGE;
+  # Use () so this compiles under strict even when PVE::Storage is not loaded yet
+  # (e.g. perl -c). At runtime PVE loads Storage before calling api().
+  my $apiver = PVE::Storage::APIVER();
+  my $apiage = PVE::Storage::APIAGE();
 
   # the plugin supports multiple PVE generations, currently we did not break anything, tell them what they want to hear if possible
   if ( $apiver >= 2 and $apiver <= $tested_apiver ) {
@@ -201,6 +208,17 @@ sub properties {
       maximum     => 3,
       default     => 0
     },
+    pgroup_sync => {
+      description => "Import Pure protection-group snapshots into QEMU VM snapshot trees (background; default off).",
+      type        => 'boolean',
+      default     => 'no'
+    },
+    pgroup_sync_interval => {
+      description => "Minimum seconds between protection-group snapshot sync runs (minimum 30).",
+      type        => 'integer',
+      minimum     => 30,
+      default     => 60
+    },
   };
 }
 
@@ -209,18 +227,20 @@ sub options {
     address => { fixed => 1 },
     token   => { fixed => 1 },
 
-    hgsuffix  => { optional => 1 },
-    vgname    => { optional => 1 },
-    podname   => { optional => 1 },
-    vnprefix  => { optional => 1 },
-    check_ssl => { optional => 1 },
-    protocol  => { optional => 1 },
-    token_ttl => { optional => 1 },
-    debug     => { optional => 1 },
-    nodes     => { optional => 1 },
-    disable   => { optional => 1 },
-    content   => { optional => 1 },
-    format    => { optional => 1 },
+    hgsuffix             => { optional => 1 },
+    vgname               => { optional => 1 },
+    podname              => { optional => 1 },
+    vnprefix             => { optional => 1 },
+    check_ssl            => { optional => 1 },
+    protocol             => { optional => 1 },
+    token_ttl            => { optional => 1 },
+    debug                => { optional => 1 },
+    pgroup_sync          => { optional => 1 },
+    pgroup_sync_interval => { optional => 1 },
+    nodes                => { optional => 1 },
+    disable              => { optional => 1 },
+    content              => { optional => 1 },
+    format               => { optional => 1 },
   };
 }
 
@@ -390,6 +410,27 @@ sub wait_for {
   $logger->( P_DEBUG, ": timeout after $time sec", undef );
 
   $fatal->( "Timeout while waiting for $message", undef );
+}
+
+# Local alarm-based timeout (PVE::Tools::run_with_timeout is not in @EXPORT_OK).
+sub purestorage_run_with_timeout {
+  my ( $timeout, $code, @param ) = @_;
+  die "got timeout\n" if !defined( $timeout ) || $timeout <= 0;
+
+  my $prev_alarm = alarm 0;
+  my $res;
+  eval {
+    local $SIG{ ALRM } = sub { die "got timeout\n" };
+    local $SIG{ __DIE__ };
+    alarm( $timeout );
+    eval { $res = $code->( @param ) };
+    alarm( 0 );
+    die $@ if $@;
+  };
+  my $err = $@;
+  alarm $prev_alarm;
+  die $err if $err;
+  return $res;
 }
 
 sub prepare_api_params {
@@ -933,7 +974,7 @@ sub try_cached_token {
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
 sub purestorage_api_call {
-  my ( $scfg, $action, $all, $storeid ) = @_;
+  my ( $scfg, $action, $all, $storeid, $array_index ) = @_;
   $logger->( P_TRACE, "purestorage_api_call", $scfg );
 
   $all //= 0;
@@ -967,10 +1008,13 @@ sub purestorage_api_call {
   my $last_success_error = ERROR_SUCCESS;
   my $last_success_content;
 
-  foreach my $i ( 0, 1 ) {
+  # Optional $array_index pins the call to one configured array (e.g. get_identity).
+  my @try_indices = defined( $array_index ) ? ( $array_index ) : ( 0, 1 );
+
+  foreach my $i ( @try_indices ) {
     $url = $urls[$i] // '';
     my $token = $tokens[$i] // '';
-    next if $i && $url eq '' && $token eq '';
+    next if !defined( $array_index ) && $i && $url eq '' && $token eq '';
 
     $array_count++;
 
@@ -1173,7 +1217,56 @@ sub purestorage_http_request {
     $content = { response => $content };
   }
 
+  # FA REST pagination: continuation token may be only in x-next-token
+  if ( ref( $content ) eq 'HASH' ) {
+    my $next = $headers->header( 'x-next-token' );
+    if ( length( $next // '' ) && !length( $content->{ continuation_token } // '' ) ) {
+      $content->{ continuation_token } = $next;
+    }
+  }
+
   return ( $error, $content );
+}
+
+# Paginated list wrapper for FA REST 2.x (limit + continuation_token).
+# Do not pass sort — Pure omits continuation_token when sort is set.
+sub purestorage_api_list {
+  my ( $scfg, $action, $storeid ) = @_;
+  $logger->( P_TRACE, "purestorage_api_list", $scfg );
+
+  my %action = %$action;
+  my %params = %{ $action{ params } // {} };
+  $params{ limit } //= 1000;
+  $action{ params } = \%params;
+
+  my @items;
+  my $token;
+  my $pages     = 0;
+  my $truncated = 0;
+  while ( 1 ) {
+    delete $params{ continuation_token };
+    $params{ continuation_token } = $token if length( $token // '' );
+
+    my $response = purestorage_api_call( $scfg, \%action, 0, $storeid );
+    push @items, @{ $response->{ items } // [] };
+
+    $token = $response->{ continuation_token };
+    last unless length( $token // '' );
+    if ( ++$pages >= 10000 ) {    # safety against runaway pagination
+      $truncated = 1;
+      $logger->(
+        P_WARN,
+        "purestorage_api_list [$storeid]: truncated after 10000 pages"
+          . " (action="
+          . ( $action{ name } // $action{ type } // '?' )
+          . "); results may be incomplete",
+        $scfg
+      );
+      last;
+    }
+  }
+
+  return { items => \@items, truncated => $truncated };
 }
 
 sub purestorage_list_volumes {
@@ -1199,7 +1292,7 @@ sub purestorage_get_volumes {
     params => { filter => $filter }
   };
 
-  my $response = purestorage_api_call( $scfg, $action, 0, $storeid );
+  my $response = purestorage_api_list( $scfg, $action, $storeid );
 
   my $pref_len = length( purestorage_name_prefix( $scfg ) );
   my @volumes  = map {
@@ -1515,11 +1608,16 @@ sub purestorage_snap_volume_create {
 }
 
 sub purestorage_volume_restore {
-  my ( $class, $scfg, $storeid, $volname, $svolname, $snap, $overwrite ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $svolname, $snap, $overwrite, $exact_snap_name ) = @_;
   $logger->( P_DEBUG, "purestorage_volume_restore", $scfg );
 
   my $params = { names => purestorage_name( $scfg, $volname ) };
   $params->{ overwrite } = $overwrite ? 'true' : 'false' if defined $overwrite;
+
+  my $source_name =
+    length( $exact_snap_name // '' )
+    ? $exact_snap_name
+    : purestorage_name( $scfg, $svolname, $snap );
 
   my $action = {
     name   => 'restore volume',
@@ -1528,14 +1626,17 @@ sub purestorage_volume_restore {
     params => $params,
     body   => {
       source => {
-        name => purestorage_name( $scfg, $svolname, $snap )
+        name => $source_name
       }
     }
   };
 
   purestorage_api_call( $scfg, $action, 0, $storeid );
 
-  my $source = length( $snap ) ? 'snapshot "' . $snap . '"' : '';
+  my $source =
+    length( $exact_snap_name // '' )
+    ? 'snapshot "' . $exact_snap_name . '"'
+    : ( length( $snap ) ? 'snapshot "' . $snap . '"' : '' );
   if ( $volname ne $svolname ) {
     $source .= ' of ' if $source ne '';
     $source .= 'volume "' . $svolname . '"';
@@ -1578,6 +1679,482 @@ sub purestorage_snap_volume_delete {
   $message = ( $response->{ errors } ? 'already ' : '' ) . 'eradicated';
   $logger->( P_INFO, "Volume \"$volname\" snapshot \"$snap_name\" is $message.", $scfg );
   return 1;
+}
+
+# True when the array snapshot was created through Proxmox (vol.snap-<name> / veeam-*).
+sub purestorage_array_snapshot_is_pve_ui_snapshot {
+  my ( $scfg, $volname, $snap_row ) = @_;
+
+  my $suffix = $snap_row->{ suffix } // '';
+  return 1 if $suffix =~ /^(snap-|veeam-)/;
+
+  my $base      = purestorage_name( $scfg, $volname );
+  my $snap_name = $snap_row->{ name } // '';
+  return 0 unless length( $base ) && index( $snap_name, "$base." ) == 0;
+  my $rest = substr( $snap_name, length( $base ) + 1 );
+  return ( $rest =~ /^(snap-|veeam-)/ ) ? 1 : 0;
+}
+
+# Parent protection-group snapshot name (PGROUP.SUFFIX), or undef for volume-only snaps.
+sub purestorage_pgroup_parent_name {
+  my ( $snap_row, $source_name ) = @_;
+
+  for my $key ( qw(snapshot_group group) ) {
+    my $ref = $snap_row->{ $key };
+    if ( ref( $ref ) eq 'HASH' && length( $ref->{ name } // '' ) ) {
+      return $ref->{ name };
+    }
+  }
+
+  my $snap_name = $snap_row->{ name } // '';
+  return undef unless length( $source_name // '' ) && length( $snap_name );
+  my $tail = '.' . $source_name;
+  return undef unless length( $snap_name ) > length( $tail );
+  return undef unless substr( $snap_name, -length( $tail ) ) eq $tail;
+
+  # Volume-only snaps are VOL.SUFFIX — parent would equal nothing useful / empty after strip
+  # of a single-segment suffix. Require at least one '.' in the parent (PGROUP.SUFFIX).
+  my $parent = substr( $snap_name, 0, length( $snap_name ) - length( $tail ) );
+  return undef unless index( $parent, '.' ) >= 0;
+  return $parent;
+}
+
+# PVE snapshot names disallow '.'; sanitize parent PGROUP.SUFFIX → PGROUP-SUFFIX.
+sub purestorage_pve_snapname_from_parent {
+  my ( $parent ) = @_;
+  return undef unless length( $parent // '' );
+  my $name = $parent;
+  $name =~ s/\./-/g;
+  return $name;
+}
+
+sub purestorage_pg_description_parent {
+  my ( $description ) = @_;
+  return undef unless defined $description && $description =~ /^PG:\s*([^\s;]+)/;
+  return $1;
+}
+
+# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }.
+sub purestorage_pg_description_members {
+  my ( $description ) = @_;
+  my %members;
+  return \%members unless defined $description && $description =~ /^PG:/;
+  while ( $description =~ /;\s*([^:;]+):\s*([^;]+)/g ) {
+    my ( $vol, $snap ) = ( $1, $2 );
+    $vol  =~ s/^\s+|\s+$//g;
+    $snap =~ s/^\s+|\s+$//g;
+    $members{ $vol } = $snap if length( $vol ) && length( $snap );
+  }
+  return \%members;
+}
+
+# Build a PVE snapshot config entry without clobbering description/parent.
+sub purestorage_snapshot_entry_from_conf {
+  my ( $conf, $snaptime, $description ) = @_;
+  my $entry = {
+    snaptime    => $snaptime,
+    description => $description,
+  };
+  my %skip = map { $_ => 1 } qw(snapshots snapstate lock pending description parent digest meta);
+  for my $k ( keys %$conf ) {
+    next if $skip{ $k };
+    next if ref( $conf->{ $k } );
+    $entry->{ $k } = $conf->{ $k };
+  }
+  return $entry;
+}
+
+sub purestorage_vm_snap_description {
+  my ( $vmid, $snap ) = @_;
+  return undef unless defined $vmid && length( $snap // '' );
+  eval { require PVE::QemuConfig };
+  return undef if $@;
+  my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
+  return undef if $@ || !$conf;
+  my $entry = $conf->{ snapshots }->{ $snap };
+  return undef unless ref( $entry ) eq 'HASH';
+  my $desc = $entry->{ description };
+  return defined $desc ? "$desc" : undef;
+}
+
+sub purestorage_snap_is_pg_imported {
+  my ( $class, $volname, $snap ) = @_;
+  my ( undef,  undef,    $vmid ) = eval { $class->parse_volname( $volname ) };
+  return 0 unless defined $vmid;
+  my $desc = purestorage_vm_snap_description( $vmid, $snap );
+  return defined( purestorage_pg_description_parent( $desc ) ) ? 1 : 0;
+}
+
+# Resolve imported PVE snap name to the exact Pure member volume-snapshot name.
+sub purestorage_resolve_imported_snap {
+  my ( $class, $scfg, $storeid, $volname, $pve_snap ) = @_;
+
+  my ( undef, undef, $vmid ) = $class->parse_volname( $volname );
+  my $desc   = purestorage_vm_snap_description( $vmid, $pve_snap );
+  my $parent = purestorage_pg_description_parent( $desc );
+
+  my $full_vol = purestorage_name( $scfg, $volname );
+
+  if ( length( $desc // '' ) && length( $parent // '' ) ) {
+    if ( $desc =~ /(?:^|;\s*)\Q$full_vol\E:\s*([^;]+)/ ) {
+      my $member = $1;
+      $member =~ s/^\s+|\s+$//g;
+      return $member if length( $member );
+    }
+  }
+
+  $parent //= do {
+
+    # Fall back: find a pgroup parent whose sanitized name matches the PVE key
+    my $pg_resp = eval {
+      purestorage_api_list(
+        $scfg,
+        {
+          name   => 'list protection group snapshots',
+          type   => 'protection-group-snapshots',
+          method => 'GET',
+          params => { destroyed => 'false' }
+        },
+        $storeid
+      );
+    };
+    my $found;
+    if ( $pg_resp && ref( $pg_resp->{ items } ) eq 'ARRAY' ) {
+      for my $pg ( @{ $pg_resp->{ items } } ) {
+        my $pname = $pg->{ name } // '';
+        next unless length( $pname );
+        if ( ( purestorage_pve_snapname_from_parent( $pname ) // '' ) eq $pve_snap ) {
+          $found = $pname;
+          last;
+        }
+      }
+    }
+    $found;
+  };
+  return undef unless length( $parent // '' );
+
+  my $expected = $parent . '.' . $full_vol;
+  my $resp     = eval {
+    purestorage_api_list(
+      $scfg,
+      {
+        name   => 'list volume snapshots',
+        type   => 'volume-snapshots',
+        method => 'GET',
+        params => {
+          source_names => $full_vol,
+          destroyed    => 'false'
+        }
+      },
+      $storeid
+    );
+  };
+  return undef unless $resp && ref( $resp->{ items } ) eq 'ARRAY';
+  for my $row ( @{ $resp->{ items } } ) {
+    my $name = $row->{ name } // '';
+    return $name if $name eq $expected;
+    my $row_parent = purestorage_pgroup_parent_name( $row, $full_vol );
+    return $name if length( $row_parent // '' ) && $row_parent eq $parent;
+  }
+  return undef;
+}
+
+# Schedule pgroup sync outside status(): non-blocking lock + fork so pvestatd is not stalled.
+sub purestorage_maybe_schedule_pgroup_sync {
+  my ( $scfg, $storeid ) = @_;
+  return unless $scfg->{ pgroup_sync };
+
+  my $interval = $scfg->{ pgroup_sync_interval } // 60;
+  $interval = 30 if $interval < 30;
+
+  my $ts_file   = "/var/run/pve-pure-sync-${storeid}.ts";
+  my $lock_file = "/var/run/pve-pure-sync-${storeid}.lock";
+
+  open( my $lf, '>>', $lock_file ) or return;
+  flock( $lf, LOCK_EX | LOCK_NB )  or do { close $lf; return; };
+
+  my $last = 0;
+  if ( open my $fh, '<', $ts_file ) {
+    $last = <$fh> // 0;
+    chomp $last;
+    close $fh;
+  }
+  if ( time() - $last < $interval ) {
+    close $lf;
+    return;
+  }
+
+  # Claim this interval under the lock before forking.
+  my $tmp = "$ts_file.tmp.$$";
+  if ( open my $out, '>', $tmp ) {
+    print $out time();
+    close $out;
+    rename $tmp, $ts_file;
+  }
+
+  my $pid = fork();
+  if ( !defined $pid ) {
+    $logger->( P_WARN, "Pure snapshot sync: fork failed: $!", $scfg );
+    close $lf;
+    return;
+  }
+  if ( $pid == 0 ) {
+
+    # Keep $lf open so the lock is held for the duration of the sync; parent
+    # closes its copy below. Another status() tick will then fail LOCK_NB.
+    eval {
+      purestorage_run_with_timeout( 120, sub { purestorage_sync_array_snapshots( $scfg, $storeid ) } );
+    };
+    $logger->( P_WARN, "Pure snapshot sync: $@", $scfg ) if $@;
+    close $lf;
+    _exit( 0 );
+  }
+
+  close $lf;    # child's inherited FD still holds the exclusive lock
+  return;
+}
+
+# Import protection-group snapshots into QEMU VM configs (Nimble-style sync).
+sub purestorage_sync_array_snapshots {
+  my ( $scfg, $storeid ) = @_;
+
+  eval { require PVE::QemuConfig };
+  return if $@;
+
+  my $pref     = purestorage_name_prefix( $scfg );
+  my $pref_len = length( $pref );
+
+  my $vol_resp = eval {
+    purestorage_api_list(
+      $scfg,
+      {
+        name   => 'list volumes for snapshot sync',
+        type   => 'volumes',
+        method => 'GET',
+        params => {
+          filter => {
+            name      => [ map { purestorage_name( $scfg, $_ ) } split( ',', 'vm-*-disk-*,vm-*-cloudinit' ) ],
+            destroyed => 'false'
+          }
+        }
+      },
+      $storeid
+    );
+  };
+  if ( !$vol_resp || ref( $vol_resp->{ items } ) ne 'ARRAY' ) {
+    $logger->( P_WARN, "purestorage_sync [$storeid]: volume list failed; skipping sync", $scfg );
+    return;
+  }
+  my $fetch_incomplete = $vol_resp->{ truncated } ? 1 : 0;
+
+  my %vol_map;    # full_pure_name => { volname, vmid }
+  for my $v ( @{ $vol_resp->{ items } } ) {
+    my $name = $v->{ name } // '';
+    next if $pref_len && index( $name, $pref ) != 0;
+    my $volname = $pref_len ? substr( $name, $pref_len ) : $name;
+    next unless $volname =~ /^vm-(\d+)-(disk-|cloudinit)/;
+    $vol_map{ $name } = { volname => $volname, vmid => $1 };
+  }
+  $logger->( P_DEBUG, "purestorage_sync [$storeid]: " . scalar( keys %vol_map ) . " PVE volumes found", $scfg );
+  return unless %vol_map;
+
+  # Skip volumes owned by LXC containers (this plugin also serves "rootdir"
+  # content) - only QEMU VM configs are synced here.
+  my %vmid_is_qemu;
+  for my $name ( keys %vol_map ) {
+    my $vmid = $vol_map{ $name }{ vmid };
+    next if exists $vmid_is_qemu{ $vmid };
+    my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
+    $vmid_is_qemu{ $vmid } = ( !$@ && ref( $conf ) eq 'HASH' ) ? 1 : 0;
+  }
+  for my $name ( keys %vol_map ) {
+    delete $vol_map{ $name } unless $vmid_is_qemu{ $vol_map{ $name }{ vmid } };
+  }
+  return unless %vol_map;
+
+  my @snaps;
+  my @vol_names  = keys %vol_map;
+  my $chunk_size = 50;              # keep source_names query string length bounded
+  for ( my $i = 0 ; $i < @vol_names ; $i += $chunk_size ) {
+    my $end = $i + $chunk_size - 1;
+    $end = $#vol_names if $end > $#vol_names;
+    my @chunk = @vol_names[ $i .. $end ];
+    my $r     = eval {
+      purestorage_api_list(
+        $scfg,
+        {
+          name   => 'list volume snapshots',
+          type   => 'volume-snapshots',
+          method => 'GET',
+          params => {
+            source_names => \@chunk,
+            destroyed    => 'false'
+          }
+        },
+        $storeid
+      );
+    };
+    if ( !$r || ref( $r->{ items } ) ne 'ARRAY' ) {
+      $fetch_incomplete = 1;
+      next;
+    }
+    $fetch_incomplete = 1 if $r->{ truncated };
+    push @snaps, @{ $r->{ items } };
+  }
+
+  my %pg_created;
+  my $pg_resp = eval {
+    purestorage_api_list(
+      $scfg,
+      {
+        name   => 'list protection group snapshots',
+        type   => 'protection-group-snapshots',
+        method => 'GET',
+        params => { destroyed => 'false' }
+      },
+      $storeid
+    );
+  };
+  if ( !$pg_resp || ref( $pg_resp->{ items } ) ne 'ARRAY' ) {
+    $fetch_incomplete = 1;
+  } else {
+    $fetch_incomplete = 1 if $pg_resp->{ truncated };
+    for my $pg ( @{ $pg_resp->{ items } } ) {
+      my $pname = $pg->{ name } // '';
+      next unless length( $pname );
+      $pg_created{ $pname } = $pg->{ created };
+    }
+  }
+
+  # vmid => parent => { full_vol => member_snap_name, ... }
+  my %by_vmid;
+  for my $s ( @snaps ) {
+    my $source = ref( $s->{ source } ) eq 'HASH' ? ( $s->{ source }{ name } // '' ) : '';
+    next unless length( $source ) && exists $vol_map{ $source };
+    my $volname = $vol_map{ $source }{ volname };
+    next if purestorage_array_snapshot_is_pve_ui_snapshot( $scfg, $volname, $s );
+    my $parent = purestorage_pgroup_parent_name( $s, $source );
+    next unless length( $parent // '' );
+    next unless exists $pg_created{ $parent };
+    my $vmid = $vol_map{ $source }{ vmid };
+    $by_vmid{ $vmid }{ $parent }{ $source } = $s->{ name } // ( $parent . '.' . $source );
+  }
+
+  # Always touch every discovered QEMU vmid so prune still runs when the array
+  # no longer has any complete/live pgroup snapshots for them.
+  my %vmids_to_touch = map { $vol_map{ $_ }{ vmid } => 1 } keys %vol_map;
+
+  for my $vmid ( sort { $a <=> $b } keys %vmids_to_touch ) {
+    my @groups;
+
+    for my $parent ( sort keys %{ $by_vmid{ $vmid } // {} } ) {
+      my $members = $by_vmid{ $vmid }{ $parent };
+
+      # Historical completeness: accept any non-empty member set from the
+      # snapshot itself. Do not require every *current* VM volume (e.g. a
+      # cloudinit disk added later) to be present in past pgroup snaps.
+      next unless $members && keys %$members;
+
+      my $pve_name = purestorage_pve_snapname_from_parent( $parent );
+      next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+      my $created_ms = $pg_created{ $parent };
+      my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
+
+      my @parts = ( "PG: $parent" );
+      for my $fvn ( sort keys %$members ) {
+        push @parts, "$fvn: $members->{$fvn}";
+      }
+      push @groups,
+        {
+          pve_name    => $pve_name,
+          parent      => $parent,
+          snaptime    => $snaptime,
+          description => join( '; ', @parts ),
+        };
+    }
+
+    my %keep = map { $_->{ pve_name } => 1 } @groups;
+
+    eval {
+      PVE::QemuConfig->lock_config(
+        $vmid,
+        sub {
+          my $conf    = PVE::QemuConfig->load_config( $vmid );
+          my $psnaps  = $conf->{ snapshots } //= {};
+          my $changed = 0;
+
+          for my $g ( @groups ) {
+            my $pve_name   = $g->{ pve_name };
+            my $want_desc  = $g->{ description } // '';
+            my $final_name = $pve_name;
+
+            if ( exists $psnaps->{ $pve_name } ) {
+              my $cur = $psnaps->{ $pve_name }{ description };
+              $cur = defined $cur ? "$cur" : '';
+              my $ours = defined( purestorage_pg_description_parent( $cur ) ) || $cur eq '';
+              if ( $ours ) {
+                if ( length $want_desc && $cur ne $want_desc ) {
+                  $psnaps->{ $pve_name }{ description } = $want_desc;
+                  $changed = 1;
+                }
+                my $old_st = $psnaps->{ $pve_name }{ snaptime };
+                $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
+                if ( $old_st <= 0 && $g->{ snaptime } > 0 ) {
+                  $psnaps->{ $pve_name }{ snaptime } = $g->{ snaptime };
+                  $changed = 1;
+                }
+                next;
+              }
+
+              # Name taken by a non-imported snap — unique fallback.
+              # Register keep before next so later cycles do not prune/recreate.
+              $final_name = $pve_name . '-' . $g->{ snaptime };
+              $keep{ $final_name } = 1;
+              next if exists $psnaps->{ $final_name };
+            }
+
+            $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $g->{ snaptime }, $want_desc );
+            $changed = 1;
+          }
+
+          if ( !$fetch_incomplete ) {
+            for my $sname ( keys %$psnaps ) {
+              next if $keep{ $sname };
+              my $desc = $psnaps->{ $sname }{ description };
+              $desc = defined $desc ? "$desc" : '';
+              next unless defined( purestorage_pg_description_parent( $desc ) );
+
+              # Ours if the stored member list names any volume for this vmid
+              # on this storage (current or removed since import).
+              my $members = purestorage_pg_description_members( $desc );
+              my $ours    = 0;
+              for my $fvn ( keys %$members ) {
+                if ( exists $vol_map{ $fvn } && $vol_map{ $fvn }{ vmid } eq $vmid ) {
+                  $ours = 1;
+                  last;
+                }
+                my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
+                if ( $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/ ) {
+                  $ours = 1;
+                  last;
+                }
+              }
+              next unless $ours;
+              delete $psnaps->{ $sname };
+              $changed = 1;
+            }
+          }
+
+          if ( $changed ) {
+            PVE::QemuConfig->write_config( $vmid, $conf );
+            $logger->( P_DEBUG, "purestorage_sync [$storeid]: vmid $vmid config updated", $scfg );
+          }
+        }
+      );
+    };
+    $logger->( P_WARN, "purestorage_sync [$storeid]: vmid $vmid: $@", $scfg ) if $@;
+  }
 }
 
 ### BLOCK: Storage implementation
@@ -1771,6 +2348,10 @@ sub status {
   # Mark storage as active
   my $active = 1;
 
+  # Optional background import of protection-group snapshots (see pgroup_sync).
+  # Forked off status() so pvestatd / GUI storage polls are not blocked.
+  purestorage_maybe_schedule_pgroup_sync( $scfg, $storeid );
+
   # Return total, free, used space and the active status
   return ( $total, $free, $used, $active );
 }
@@ -1902,9 +2483,12 @@ sub deactivate_volume {
 }
 
 sub volume_resize {
-  my ( $class, $scfg, $storeid, $volname, $size, $running ) = @_;
+  my ( $class, $scfg, $storeid, $volname, $size, $running, $snapname ) = @_;
   $logger->( P_DEBUG, "volume_resize",   $scfg );
   $logger->( P_DEBUG, "New Size: $size", $scfg );
+
+  # APIVER 15: snapshot resize is for snapshot-as-volume-chain backends only.
+  $fatal->( "resizing a snapshot is not supported for $class", $scfg ) if $snapname;
 
   return $class->purestorage_resize_volume( $scfg, $storeid, $volname, $size );
 }
@@ -1953,7 +2537,14 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   $logger->( P_DEBUG, "volume_snapshot_rollback", $scfg );
 
-  $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1 );
+  if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
+    my $exact = $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap );
+    $fatal->( "Pure protection-group snapshot \"$snap\" not found for volume \"$volname\"", $scfg )
+      unless length( $exact // '' );
+    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1, $exact );
+  } else {
+    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1 );
+  }
 
   return 1;
 }
@@ -1962,9 +2553,118 @@ sub volume_snapshot_delete {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   $logger->( P_DEBUG, "volume_snapshot_delete", $scfg );
 
+  if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
+    $fatal->(
+      "Snapshot \"$snap\" is an imported Pure protection-group snapshot; " . "delete it from the Pure array (protection group), not from Proxmox.", $scfg
+    );
+  }
+
   $class->purestorage_snap_volume_delete( $scfg, $storeid, $snap, $volname );
 
   return 1;
+}
+
+sub volume_snapshot_info {
+  my ( $class, $scfg, $storeid, $volname ) = @_;
+  $logger->( P_DEBUG, "volume_snapshot_info", $scfg );
+
+  my $full_vol = purestorage_name( $scfg, $volname );
+  my $resp     = eval {
+    purestorage_api_list(
+      $scfg,
+      {
+        name   => 'list volume snapshots',
+        type   => 'volume-snapshots',
+        method => 'GET',
+        params => {
+          source_names => $full_vol,
+          destroyed    => 'false'
+        }
+      },
+      $storeid
+    );
+  };
+  return {} unless $resp && ref( $resp->{ items } ) eq 'ARRAY';
+
+  my %info;
+  for my $s ( @{ $resp->{ items } } ) {
+    my $array_name = $s->{ name } // '';
+    my $created_ms = $s->{ created };
+    my $ts         = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
+    my $pve_name;
+
+    if ( purestorage_array_snapshot_is_pve_ui_snapshot( $scfg, $volname, $s ) ) {
+      my $suffix = $s->{ suffix } // '';
+      if ( $suffix =~ /^snap-(.+)$/ ) {
+        $pve_name = $1;
+        $pve_name =~ s/^veeam-/veeam_/;
+      } elsif ( $array_name =~ /\.snap-(.+)$/ ) {
+        $pve_name = $1;
+        $pve_name =~ s/^veeam-/veeam_/;
+      }
+    } else {
+      my $parent = purestorage_pgroup_parent_name( $s, $full_vol );
+      $pve_name = purestorage_pve_snapname_from_parent( $parent ) if length( $parent // '' );
+    }
+    next unless length( $pve_name // '' );
+
+    my $entry = {
+      id        => ( $s->{ id } // $array_name ),
+      timestamp => $ts,
+    };
+    $entry->{ 'virtual-size' } = $s->{ provisioned } if defined $s->{ provisioned };
+    $info{ $pve_name } = $entry;
+  }
+  return \%info;
+}
+
+sub volume_rollback_is_possible {
+  my ( $class, $scfg, $storeid, $volname, $snap, $blockers ) = @_;
+  $logger->( P_DEBUG, "volume_rollback_is_possible", $scfg );
+
+  $blockers //= [];
+  if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
+    my $exact = eval { $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap ) };
+    unless ( length( $exact // '' ) ) {
+      push @$blockers, "Pure protection-group snapshot \"$snap\" not found for \"$volname\"";
+      return 0;
+    }
+    return 1;
+  }
+
+  # PVE-created snap: verify array object exists
+  my $name = purestorage_name( $scfg, $volname, $snap );
+  my $resp = eval {
+    purestorage_api_list(
+      $scfg,
+      {
+        name   => 'get volume snapshot',
+        type   => 'volume-snapshots',
+        method => 'GET',
+        params => {
+          names     => $name,
+          destroyed => 'false'
+        }
+      },
+      $storeid
+    );
+  };
+  my $found = 0;
+  if ( $resp && ref( $resp->{ items } ) eq 'ARRAY' ) {
+    for my $row ( @{ $resp->{ items } } ) {
+      if ( ( $row->{ name } // '' ) eq $name ) { $found = 1; last; }
+    }
+  }
+  unless ( $found ) {
+    push @$blockers, "Snapshot \"$snap\" not found on Pure for volume \"$volname\"";
+    return 0;
+  }
+  return 1;
+}
+
+sub rename_snapshot {
+  my ( $class, $scfg, $storeid, $volname, $snap, $newsnapname ) = @_;
+  $fatal->( "rename_snapshot is not supported", $scfg );
 }
 
 sub volume_has_feature {
@@ -1995,5 +2695,36 @@ sub on_update_hook_full {
   $logger->( P_DEBUG, "on_update_hook_full", $scfg );
 
   return;
+}
+
+# APIVER 14: stable backend identity independent of storage.cfg naming.
+# Pin to the first configured array so ActiveCluster failover cannot change the id.
+sub get_identity {
+  my ( $class, $scfg, $storeid ) = @_;
+  $logger->( P_DEBUG, "get_identity", $scfg );
+
+  my $response = eval {
+    purestorage_api_call(
+      $scfg,
+      {
+        name   => 'get array identity',
+        type   => 'arrays',
+        method => 'GET',
+      },
+      0, $storeid,
+      0    # first configured array only
+    );
+  };
+  $fatal->( "get_identity: failed to query first configured Pure array: $@", $scfg ) if $@;
+
+  my $items = $response->{ items };
+  $fatal->( "get_identity: empty arrays response from Pure", $scfg )
+    unless ref( $items ) eq 'ARRAY' && @$items;
+
+  my $arr = $items->[0];
+  my $id  = $arr->{ id } // $arr->{ name };
+  $fatal->( "get_identity: Pure array entry missing id/name", $scfg ) unless length( $id // '' );
+
+  return "$id";
 }
 1;
