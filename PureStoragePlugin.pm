@@ -1690,12 +1690,12 @@ sub purestorage_resize_volume {
 
   my ( $device_path, @slaves ) = block_device_slaves( $path );
 
-  # Iterate through slaves and rescan each device
-  block_device_action( 'rescan', @slaves );
+  # Rescan every path: a path that keeps the old size makes the multipath map refuse the resize
+  block_device_action( 'rescan', lun_paths( $wwid, @slaves ) );
 
   if ( multipath_check( $wwid ) ) {
     $logger->( P_DEBUG, "Device \"$wwid\" is a multipath device. Proceeding with resizing.", $scfg );
-    exec_command( [ 'multipathd', 'resize', 'map', $wwid ] );
+    multipath_resize_map( $wwid );
   }
 
   $logger->( P_DEBUG, "Expected size = $size", $scfg );
@@ -1706,7 +1706,6 @@ sub purestorage_resize_volume {
     return $new_size >= $size;
   };
 
-  # FIXME: With the current implementation we may not need to wait
   wait_for( $updated_size, "volume \"$volname\" size update" );
 
   $logger->( P_DEBUG, "New size detected for volume \"$volname\": $new_size bytes.", $scfg );
