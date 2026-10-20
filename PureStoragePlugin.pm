@@ -2497,6 +2497,31 @@ sub volume_size_info {
   return wantarray ? ( $volume->{ size }, 'raw', $volume->{ used }, undef ) : $volume->{ size };
 }
 
+# The LUN of a volume that is mapped: of the disk its by-id link leads to, or of the first path of its multipath map.
+sub volume_lun {
+  my ( $path ) = @_;
+
+  my $device = abs_path( $path ) // return undef;
+  $device = basename( $device );
+  ( $device ) = map { basename( $_ ) } glob( "$SYSFS_BLOCK/$device/slaves/*" ) if $device =~ /^dm-/;
+  return defined( $device ) ? scsi_device_lun( $device ) : undef;
+}
+
+# A device of a removed volume on the same LUN hides the new volume: when the path does not show up soon, every Pure
+# device is checked, and when it does, the devices on its LUN are.
+sub wait_for_volume_path {
+  my ( $wwid, $path, $volname ) = @_;
+
+  my $path_exists = sub { return -e $path };
+  if ( wait_for( $path_exists, "volume \"$volname\" to map", $STALE_PATH_WAIT, undef, 1 ) ) {
+    my $lun = volume_lun( $path );
+    heal_stale_paths( $wwid, $lun ) if defined $lun;
+  } else {
+    heal_stale_paths( $wwid );
+    wait_for( $path_exists, "volume \"$volname\" to map", 30 );
+  }
+}
+
 sub map_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $hints ) = @_;
   $logger->( P_DEBUG, "map_volume", $scfg );
@@ -2513,12 +2538,7 @@ sub map_volume {
     $fatal->( "Protocol: \"$protocol\" isn't a valid protocol", $scfg );
   }
 
-  my $path_exists = sub {
-    return -e $path;
-  };
-
-  # Wait for the device to appear
-  wait_for( $path_exists, "volume \"$volname\" to map", 30 );
+  wait_for_volume_path( $wwid, $path, $volname );
 
   # we might end up with operational disk but without multipathing, e.g.
   # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
