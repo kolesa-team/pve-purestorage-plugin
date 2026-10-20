@@ -1,1 +1,2 @@
 PureStoragePlugin.pm usr/share/perl5/PVE/Storage/Custom
+udev/68-pure-storage.rules usr/lib/udev/rules.d

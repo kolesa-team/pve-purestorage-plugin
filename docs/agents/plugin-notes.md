@@ -9,6 +9,12 @@ Facts about `PureStoragePlugin.pm` that are not obvious from the code. Read the 
 - `unmap_volume` keeps the signature `($class, $storeid, $scfg, $volname, $snapname)`: `PVE::Storage::unmap_volume` passes a snapshot name as the fourth argument. Never repurpose an argument of a method that PVE calls.
 - Writes into sysfs go through `syswrite` and a refused write is logged: with `print` and `close` the error was lost. The value is written with a trailing newline: the kernel (6.8, PVE 8) answers `Invalid argument` to `offline` in `device/state` without it.
 
+## Guest LVM on the map
+
+- The host activates the volume group that a guest keeps on its disk: `69-lvm.rules` runs `pvscan -aay` for the multipath map (`/dev/dm-N`, `ID_FS_TYPE=LVM2_member`) on its change event. The SCSI paths do not start it: `60-multipath.rules` marks them `DM_MULTIPATH_DEVICE_PATH=1` on add, `69-lvm.rules` skips those. The logical volume holds the map, `multipathd remove map` refuses and the deactivation fails.
+- `global_filter` (rejecting `/dev/mapper/3624a9370.*` and the by-id names) did not stop it on PVE 8 (LVM 2.03.16); the likely reason is that `pvscan` gets only `/dev/dm-N` and does not see those names (not verified). On PVE 9 (LVM 2.03.31) the activation did not happen at all, so the rule is checked there only for doing no harm. `udev/68-pure-storage.rules` removes `ID_FS_TYPE` from maps `mpath-3624a9370*` before `69-lvm.rules`. `DM_UDEV_DISABLE_OTHER_RULES_FLAG` is not an option: `60-kpartx.rules` reads it too and the partition maps would stop.
+- LVM does not activate a group a second time while `/run/lvm/vgs_online/<vg>` exists, so a repeated test must delete the flag (`guest_lvm_holder` does).
+
 ## Activation
 
 - `PVE::Storage::activate_volumes` does not undo a failed activation, and `deactivate_volumes` runs only from some callers. `activate_volume` therefore deactivates the volume itself when `map_volume` fails, but only when this call connected it (`purestorage_volume_connection` returns 1 for a new connection and 0 for `already connected`). A volume connected before may be held by a running guest, and a map that nothing holds at that moment is removed without a refusal, which takes the paths from under the guest.

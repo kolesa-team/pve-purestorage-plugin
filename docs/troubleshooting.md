@@ -42,15 +42,9 @@ jq 'del(.auth_token)' /etc/pve/priv/purestorage/<storage_id>_array0.json
 
 **LVM inside a volume:**
 
-If you plan to use LVM inside a volume, add the Pure volumes to the ignore list of LVM (add the rule to your existing `global_filter`). Without the filter the host activates the volume groups it finds on guest disks. An active logical volume holds the partition map of the volume, `multipathd remove map` refuses to remove the map, the plugin retries for 30 seconds and then the deactivation fails with `Timeout while waiting for multipath map ... to be released`: the volume stays connected to the node (after a migration it ends up connected to two nodes) and its paths stay on the node until the logical volume is deactivated and the volume is deactivated again.
+When a guest keeps LVM on its disk, udev (`69-lvm.rules`) runs `pvscan` for the multipath map of the volume as soon as it appears, and the host activates the volume group of the guest. The logical volume stands on top of the map and holds it open: `multipathd remove map` refuses, the plugin retries for 30 seconds and then the deactivation fails with `Timeout while waiting for multipath map ... to be released`. The volume stays connected to the node (after a migration it ends up connected to two nodes) and its paths stay on the node until the logical volume is removed and the volume is deactivated again.
 
-```bash
-cat /etc/lvm/lvmlocal.conf
-...
-devices {
-  global_filter=["r|/dev/mapper/3624a9370.*|"]
-}
-```
+This was seen on PVE 8 (LVM 2.03.16), where a `global_filter` that rejects `/dev/mapper/...` and the `by-id` names did not stop it (`pvscan` is given the single device `/dev/dm-N`); it did not happen on PVE 9 (LVM 2.03.31). The packaged rule `68-pure-storage.rules` takes the LVM mark off the map before `69-lvm.rules` reads it, see [udev Rules](install.md#udev-rules). Check that it is in effect with `udevadm info /dev/mapper/<wwid> | grep ID_FS_TYPE` (no `LVM2_member`). To get a stuck volume out, remove the logical volume of the guest (`dmsetup ls --tree` shows it on top of the map, `dmsetup remove <name>`) and deactivate the volume again.
 
 **Debug output contamination ([#56](https://github.com/kolesa-team/pve-purestorage-plugin/issues/56)):** with debug logging enabled, debug messages can end up in the output of commands that must stay clean (`qm showcmd`, `pvesm path`) and break tools that parse it. Set `--debug 0` for such commands (see Debug Logging).
 

@@ -2,6 +2,7 @@
 set -e
 
 if [ "$1" = "configure" ]; then
+  udevadm control --reload-rules || true
   systemctl try-restart pve-cluster.service || true
   systemctl try-restart pvedaemon.service || true
   systemctl try-restart pvestatd.service || true

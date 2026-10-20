@@ -50,6 +50,13 @@ blacklist_exceptions {
 }
 ```
 
+### udev Rules
+
+The package installs the udev rules file `68-pure-storage.rules` into `/usr/lib/udev/rules.d/`; a source install copies it (see below). It holds two things.
+
+- A rule that keeps LVM of the host away from the multipath maps of Pure volumes. Without it the host may activate the volume group that a guest keeps on its disk, and the volume cannot be deactivated afterwards, see [LVM inside a volume](troubleshooting.md#known-issues). The file must be read before `69-lvm.rules`. The rule also applies to LVM that you run on a Pure volume on the host: its volume groups are not activated by udev, activate them with `vgchange -ay`.
+- The kernel settings that Pure recommends for FlashArray volumes (`none` scheduler, `add_random`, `rq_affinity`, SCSI timeout, `max_sectors_kb`), see the Linux recommended settings of Pure. They are applied by the same file, so a file with these settings that you install yourself (for example `99-pure-storage.rules`) only repeats them.
+
 ### iSCSI Configuration
 
 Initiate iSCSI according to the Proxmox Guidelines.
@@ -89,6 +96,8 @@ sudo apt-get install -y libpve-common-perl libwww-perl libhttp-message-perl libu
 git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
 cd pve-purestorage-plugin
 sudo install -D -m 644 PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
+sudo install -m 644 udev/68-pure-storage.rules /usr/lib/udev/rules.d/
+sudo udevadm control --reload-rules
 sudo systemctl restart pvedaemon.service pveproxy.service pvestatd.service
 ```
 
