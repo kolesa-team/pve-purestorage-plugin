@@ -1528,7 +1528,9 @@ sub purestorage_volume_connection {
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
   $logger->( P_INFO, "Volume \"$volname\" is $message host \"$hname\" on all arrays.", $scfg );
-  return 1;
+
+  # true when this call made the change, false when the array had it that way already
+  return $response->{ errors } ? 0 : 1;
 }
 
 sub purestorage_create_volume {
@@ -2668,9 +2670,21 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $logger->( P_DEBUG, "activate_volume", $scfg );
 
-  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
+  my $connected_now = $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
 
-  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
+  # PVE does not undo a failed activation: deactivate here, so that the connection on the array and the paths of
+  # a half-mapped volume do not stay behind. Only when this call connected the volume: one that was connected before
+  # may be in use (a running guest holds its multipath device), and removing it would take the disk from the guest.
+  unless ( eval { $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints ); 1 } ) {
+    my $error = $@;
+    if ( $connected_now ) {
+      eval { $class->deactivate_volume( $storeid, $scfg, $volname, $snapname, $cache ) };
+      $logger->( P_WARN, "Rollback of the failed activation of volume \"$volname\" failed: $@", $scfg ) if $@;
+    } else {
+      $logger->( P_WARN, "Mapping of volume \"$volname\" failed, the volume was connected before and is left as it was", $scfg );
+    }
+    die $error;
+  }
   return 1;
 }
 
