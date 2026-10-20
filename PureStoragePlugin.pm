@@ -136,9 +136,10 @@ sub api {
 # PVE 9:   APIVER 13 / hints parameters and on_update_hook_full
 # PVE 9:   APIVER 14 / get_identity (optional; we return FlashArray id)
 # PVE 9:   APIVER 15 / volume_resize($snapname); volume_snapshot_info virtual-size
+# PVE 9:   APIVER 16 / optional volume name and format helper methods (the plugin uses the inherited ones)
 #          (snapshot-as-volume-chain N/A for this plugin; snap resize rejected)
 
-  my $tested_apiver = 15;
+  my $tested_apiver = 16;
 
   # Use () so this compiles under strict even when PVE::Storage is not loaded yet
   # (e.g. perl -c). At runtime PVE loads Storage before calling api().
@@ -937,7 +938,7 @@ sub write_token_cache {
   my $temp_path = "$cache_path.tmp.$$";
 
   eval {
-    my $fh = IO::File->new( $temp_path, 'w', 0600 )
+    my $fh = IO::File->new( $temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600 )
       or die "Cannot create temp file $temp_path: $!\n";
     print $fh $json_text . "\n";
     $fh->close();
@@ -2475,6 +2476,9 @@ sub alloc_image {
   # Validate the name format, should start with 'vm-$vmid-disk'
   if ( defined( $name ) ) {
     $fatal->( "Illegal name \"$name\" - should be \"vm-$vmid-(disk-*|cloudinit|state-*)\"", $scfg ) if $name !~ m/^vm-$vmid-(disk-|cloudinit|state-)/;
+
+    # the content API of PVE appends the format as a suffix, the array accepts letters, digits, '_' and '-' only
+    $name =~ s/\.\Q$fmt\E$//;
   } else {
     $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
   }
@@ -2664,7 +2668,6 @@ sub volume_size_info {
 
   my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
 
-  #TODO: Consider moving this inside of purestorage_get_existing_volume_info()
   $fatal->( "PureStorage API :: No volume data found for \"$volname\"", $scfg ) unless $volume;
 
   $logger->( P_DEBUG, "Provisioned: " . $volume->{ size } . ", Used: " . $volume->{ used }, $scfg );
