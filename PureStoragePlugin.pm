@@ -2418,9 +2418,52 @@ sub list_images {
   return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
 }
 
+# PVE asks every storage for its status one after another, without a timeout, so an array that does not answer holds
+# each round for the HTTP timeout. A failure leaves a marker in a directory of this node (the way to the array is a
+# property of the node, and /run goes with a reboot); until the backoff is over the storage is inactive without a call.
+sub status_marker_path {
+  my ( $storeid ) = @_;
+
+  return "$STATUS_MARKER_DIR/$storeid.failed";
+}
+
+sub status_recently_failed {
+  my ( $storeid ) = @_;
+
+  my $changed = ( stat( status_marker_path( $storeid ) ) )[9];
+  return defined( $changed ) && time() - $changed < $STATUS_BACKOFF;
+}
+
+sub status_mark_failed {
+  my ( $storeid ) = @_;
+
+  eval {
+    File::Path::make_path( $STATUS_MARKER_DIR, { mode => 0700 } );
+    my $path = status_marker_path( $storeid );
+    open( my $fh, '>', $path ) or die "Cannot write $path: $!\n";
+    close( $fh );
+  };
+  $logger->( P_WARN, "Cannot mark storage \"$storeid\" as failed: $@", undef ) if $@;
+}
+
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   $logger->( P_DEBUG, "status", $scfg );
+
+  return ( 0, 0, 0, 0 ) if status_recently_failed( $storeid );
+
+  my @status = eval { $class->purestorage_array_status( $storeid, $scfg ) };
+  if ( $@ ) {
+    my $error = $@;
+    status_mark_failed( $storeid );
+    die $error;
+  }
+  unlink( status_marker_path( $storeid ) );
+  return @status;
+}
+
+sub purestorage_array_status {
+  my ( $class, $storeid, $scfg ) = @_;
 
   my $total;
   my $used;
