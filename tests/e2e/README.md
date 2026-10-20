@@ -69,7 +69,7 @@ Run the tests one after another, and never two runs on different nodes of one cl
 
 A `SKIP` is a capability the plugin does not provide (for example `rootdir` for containers or linked-clone bases) or a missing prerequisite; the reason is printed.
 
-`--jobs N` runs the tests that do not need the node alone N at a time and the others after them (the guest set takes about 60% of the time with `--jobs 4`). Overlapping tests can pick the same VMID (`can't lock file`, `File exists`): such a test is repeated once on its own, so a failure that is left is real. `migration_under_load`, the tests with fixed volume names and the ones that provoke plugin errors never overlap another test.
+`--jobs N` runs the tests that do not need the node alone N at a time and the others after them (the guest set takes about 60% of the time with `--jobs 4`). Overlapping tests can pick the same VMID. A test that fails with `already exists`, `File exists` or `can't lock file` is repeated once on its own; any other failure is real and is not repeated. The reason of the first failure is printed and its log is kept as `tests/e2e/logs/<test>.first.log`. `migration_under_load`, `hard_stop_integrity` and `volume_lifecycle_loop` (they read the journal of the node), the tests with fixed volume names and the ones that provoke plugin errors never overlap another test.
 
 `migration_under_load` starts only from the first node of `NODES`: a guest started on a newer node gets a machine type that the older node cannot run, so `run_suite.py --node <other>` leaves the test out and prints that it did.
 

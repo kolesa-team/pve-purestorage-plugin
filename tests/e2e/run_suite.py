@@ -16,6 +16,7 @@ import argparse
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,9 +33,11 @@ PERL_HELPER = HERE / "destroyed_volumes.pl"
 REMOTE_DIR = "/var/tmp/proxmox-e2e"
 # tests that allocate vm-<nextid>-disk-0 by a fixed name and fail when an earlier run used that name
 FIXED_NAME_TESTS = {"io_integrity", "disk_thin_discard"}
-# tests that never overlap with another one: they allocate by a fixed name, measure the whole node, or provoke the plugin
-# errors that the tests checking the journal of the node would take for their own
-SERIAL_TESTS = FIXED_NAME_TESTS | {"migration_under_load", "unmap_busy_map", "stale_lun_heal"}
+# tests that never overlap with another one: they allocate by a fixed name, measure the whole node, check its journal (and
+# would take the errors of another test for their own), or provoke the plugin errors that those tests would take
+SERIAL_TESTS = FIXED_NAME_TESTS | {"migration_under_load", "hard_stop_integrity", "volume_lifecycle_loop", "unmap_busy_map", "stale_lun_heal"}
+# what a test says when it lost the race for a VM id against a test that runs next to it: only such a failure is repeated
+RACE_MARKS = ("already exists", "File exists", "can't lock file")
 # tests that migrate the guest to another node and so start on the node with the oldest QEMU, the first of NODES: a guest
 # started on a newer node gets a machine type the older one cannot run
 FIRST_NODE_ONLY = {"migration_under_load"}
@@ -219,6 +222,7 @@ def run_selected(cfg: dict, node: str, selected: list, before: int, destroyed: s
   major = pve_major(cfg, node)
   lock = threading.Lock()
   failed = []
+  raced = set()
 
   def run_and_report(test: tuple, left: int | None) -> str:
     name, timeout, _, suite_dir = test
@@ -234,6 +238,11 @@ def run_selected(cfg: dict, node: str, selected: list, before: int, destroyed: s
       if known:
         print(f"    known failure on PVE {major}: {known}", flush=True)
       if status == "FAIL":
+        if any(mark in line for line in lines for mark in RACE_MARKS):
+          raced.add(name)
+        # the reason of a failure that a retry may turn green must stay visible
+        for line in [l for l in lines if l.lstrip().startswith("#") or "failed" in l.lower()][:6]:
+          print(f"    {line.strip()}", flush=True)
         print(f"    full output: {LOG_DIR / (name + '.log')}", flush=True)
     return status
 
@@ -244,10 +253,11 @@ def run_selected(cfg: dict, node: str, selected: list, before: int, destroyed: s
     with ThreadPoolExecutor(max_workers=jobs) as pool:
       results = list(pool.map(lambda t: (t, run_and_report(t, None)), together))
     destroyed = erase_new_destroyed(cfg, node, destroyed)
-    # tests that overlap can pick the same VM id: a failure gets one more try on its own
+    # tests that overlap can pick the same VM id: such a failure gets one more try on its own, any other one is real
     for test, status in results:
-      if status == "FAIL":
+      if status == "FAIL" and test[0] in raced:
         print(f"=== {test[0]} failed next to other tests, once more on its own ...", flush=True)
+        shutil.copy(LOG_DIR / f"{test[0]}.log", LOG_DIR / f"{test[0]}.first.log")
         status = run_and_report(test, volumes_on_storage(cfg, node) - before)
       if status == "FAIL":
         failed.append(test[0])
