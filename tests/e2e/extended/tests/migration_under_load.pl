@@ -256,13 +256,19 @@ my $migrate = sub {
       sleep 1;
     }
   }
-  my $task  = eval { $pve->wait_for_task( $client->post( "/nodes/$from/qemu/$vmid/migrate", $params ) ) };
+  my $upid  = eval         { $client->post( "/nodes/$from/qemu/$vmid/migrate", $params ) };
+  my $task  = $upid ? eval { $pve->wait_for_task( $upid ) } : undef;
   my $error = $@;
   kill 'TERM', $pid;
   waitpid( $pid, 0 );
 
   my @problems;
   push @problems, "migration $from to $to failed: " . ( $error || $task // 'unknown' ) if $error || !$pve->task_successful( $task );
+
+  # a task that ends OK can still log a warning of Perl, of Proxmox or of the plugin: that is a problem too
+  my $log = $upid ? eval { $client->get( "/nodes/$from/tasks/$upid/log" ) } : undef;
+  push @problems, "migration $from to $to logged: $_->{ t }"
+    for grep { $_->{ t } =~ /Use of uninitialized|\bWARN\b|\bERROR\b|Timeout while waiting|still present/ } @{ $log // [] };
   my $samples = 0;
   if ( open( my $fh, '<', "$dir/samples" ) ) {
     while ( <$fh> ) {
