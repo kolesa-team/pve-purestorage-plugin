@@ -1958,34 +1958,6 @@ sub purestorage_resolve_imported_snap {
     }
   }
 
-  $parent //= do {
-
-    # Fall back: find a pgroup parent whose sanitized name matches the PVE key
-    my $pg_resp = eval {
-      purestorage_api_list(
-        $scfg,
-        {
-          name   => 'list protection group snapshots',
-          type   => 'protection-group-snapshots',
-          method => 'GET',
-          params => { destroyed => 'false' }
-        },
-        $storeid
-      );
-    };
-    my $found;
-    if ( $pg_resp && ref( $pg_resp->{ items } ) eq 'ARRAY' ) {
-      for my $pg ( @{ $pg_resp->{ items } } ) {
-        my $pname = $pg->{ name } // '';
-        next unless length( $pname );
-        if ( ( purestorage_pve_snapname_from_parent( $pname ) // '' ) eq $pve_snap ) {
-          $found = $pname;
-          last;
-        }
-      }
-    }
-    $found;
-  };
   return undef unless length( $parent // '' );
 
   my $expected = $parent . '.' . $full_vol;
@@ -2012,6 +1984,33 @@ sub purestorage_resolve_imported_snap {
     return $name if length( $row_parent // '' ) && $row_parent eq $parent;
   }
   return undef;
+}
+
+# The exact array name of an imported protection-group snapshot, undef for a snapshot taken through Proxmox (its name
+# follows from the Proxmox one). An imported snapshot that is not on the array is an error.
+sub purestorage_exact_snap_name {
+  my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
+
+  return undef unless length( $snap // '' ) && $class->purestorage_snap_is_pg_imported( $volname, $snap );
+
+  my $exact = $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap );
+  $fatal->( "Pure protection-group snapshot \"$snap\" not found for volume \"$volname\"", $scfg ) unless length( $exact // '' );
+  return $exact;
+}
+
+# status() forks the protection-group sync and does not wait for it; pvestatd lives for days, so every finished run would
+# stay a zombie. The runs started by this process are remembered and reaped (without waiting) on the next call. Only
+# these: the other children of the daemon are waited for by its own code.
+my @sync_children;
+
+sub purestorage_track_sync_child {
+  my ( $pid ) = @_;
+
+  push @sync_children, $pid;
+}
+
+sub purestorage_reap_sync_children {
+  @sync_children = grep { waitpid( $_, WNOHANG ) == 0 } @sync_children;
 }
 
 # Schedule pgroup sync outside status(): non-blocking lock + fork so pvestatd is not stalled.
@@ -2361,7 +2360,7 @@ sub clone_image {
 
   my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
 
-  $class->purestorage_volume_restore( $scfg, $storeid, $name, $volname, $snap );
+  $class->purestorage_volume_restore( $scfg, $storeid, $name, $volname, $snap, undef, $class->purestorage_exact_snap_name( $scfg, $storeid, $volname, $snap ) );
 
   return $name;
 }
@@ -2805,14 +2804,7 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   $logger->( P_DEBUG, "volume_snapshot_rollback", $scfg );
 
-  if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
-    my $exact = $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap );
-    $fatal->( "Pure protection-group snapshot \"$snap\" not found for volume \"$volname\"", $scfg )
-      unless length( $exact // '' );
-    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1, $exact );
-  } else {
-    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1 );
-  }
+  $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1, $class->purestorage_exact_snap_name( $scfg, $storeid, $volname, $snap ) );
 
   return 1;
 }
