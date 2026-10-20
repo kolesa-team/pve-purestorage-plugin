@@ -29,17 +29,17 @@ jobs:
   perl-lint:
     name: Perl Lint
     if: ${{ inputs.enable-perl-lint == true }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
     - name: Setup Perl
-      uses: shogo82148/actions-setup-perl@v1
+      uses: shogo82148/actions-setup-perl@8b574cdc2dffdae49f803204a4f2b716a2fa1db7 # v1.44.2
       with:
-        perl-version: '5.34'
+        perl-version: '5.36'
 
     - name: Install cpanm
       run: |
@@ -116,15 +116,15 @@ jobs:
   markdown-lint:
     name: Markdown Lint
     if: ${{ inputs.enable-markdown-lint == true }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
     - name: Setup Node.js
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: '20'
 
