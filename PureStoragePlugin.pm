@@ -539,6 +539,40 @@ sub purestorage_name {
   return $name;
 }
 
+# Runs a command that is expected to fail now and then and logs nothing: true when it succeeded. (exec_command with a
+# negative $dm is the other way round, it is true when the command failed.)
+sub exec_quiet {
+  my ( $command ) = @_;
+
+  my @command = @$command;
+  eval        { $command[0] = get_command_path( $command[0] ) } if exists $cmd->{ $command[0] };
+  return eval { run_command( \@command, quiet => 1 ); 1 } ? 1 : 0;
+}
+
+# `multipathd <subcommand> map <wwid>` retried until it is accepted or the timeout is over, quietly: a refusal is logged by
+# the error that ends the wait, not per attempt.
+sub multipathd_map_retry {
+  my ( $subcommand, $wwid, $message, $timeout ) = @_;
+
+  wait_for( sub { exec_quiet( [ 'multipathd', $subcommand, 'map', $wwid ] ) }, "multipath map \"$wwid\" $message", $timeout // 30 );
+}
+
+# Right after the volume was activated (`qm resize` of a stopped VM) multipathd may not have the map yet:
+# its refusal is retried until the timeout.
+sub multipath_resize_map {
+  my ( $wwid, $timeout ) = @_;
+
+  multipathd_map_retry( 'resize', $wwid, 'to accept the resize', $timeout );
+}
+
+# The removal is refused while something holds the map (a reader of the device, a partition map of the volume):
+# the refusal is retried until the timeout, an error after it leaves the volume as it was.
+sub multipath_remove_map {
+  my ( $wwid, $timeout ) = @_;
+
+  multipathd_map_retry( 'remove', $wwid, 'to be released', $timeout );
+}
+
 sub get_device_path_wwn {
   my ( $serial ) = @_;
 
@@ -2555,19 +2589,37 @@ sub map_volume {
   return $path;
 }
 
+# PVE::Storage::unmap_volume calls this with a snapshot name as the fourth argument: the signature stays.
 sub unmap_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
   $logger->( P_DEBUG, "unmap_volume", $scfg );
 
-  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
-  return 0 unless $path ne '' && -b $path;
+  return $class->purestorage_unmap_volume( $storeid, $scfg, $volname );
+}
 
-  my ( $device_path, @slaves ) = block_device_slaves( $path );
+# Removes the local paths of a volume. iscsid rescans the sessions regularly and brings a removed path back
+# while the volume is still connected on the array, and such a path fails once the array disconnects the volume.
+# So every path goes offline first, $after_offline runs (the array disconnect), and only then the paths are
+# deleted.
+sub purestorage_unmap_volume {
+  my ( $class, $storeid, $scfg, $volname, $after_offline ) = @_;
+  $logger->( P_DEBUG, "purestorage_unmap_volume", $scfg );
+
+  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
+  my $linked = $path ne '' && -b $path;
+  my ( $device_path, @slaves ) = $linked ? block_device_slaves( $path ) : ( undef );
+
+  # The by-id link may point at a single path when the multipath map is not up: remove every path of the volume
+  my @remove = lun_paths( $wwid, $linked ? @slaves : () );
+  unless ( $linked || @remove ) {
+    $after_offline->() if $after_offline;
+    return 0;
+  }
 
   # Ensure all data is flushed to disk for write-back cache environments
-  $logger->( P_VERB, "Flushing filesystem and device buffers for $device_path", $scfg );
+  $logger->( P_VERB, "Flushing filesystem and device buffers for " . ( $device_path // $wwid ), $scfg );
   exec_command( ['sync'] );
-  exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
+  exec_command( [ 'blockdev', '--flushbufs', $device_path ] ) if defined $device_path;
 
   # Wait for udev events to settle, ensuring all async operations complete
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
@@ -2579,13 +2631,34 @@ sub unmap_volume {
     $logger->( P_DEBUG, "Device \"$wwid\" is a multipath device. Proceeding with multipath removal.", $scfg );
 
     # remove the link
-    exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
+    multipath_remove_map( $wwid );
   } else {
     $logger->( P_DEBUG, "Device \"$wwid\" is not a multipath device. Skipping multipath removal.", $scfg );
   }
 
-  # Iterate through slaves and remove each device
-  block_device_action( 'remove', @slaves );
+  block_device_action( 'offline', @remove );
+
+  # paths left offline are worse than the race, so they are deleted even when $after_offline fails
+  my $after_ok    = !$after_offline || eval { $after_offline->(); 1 };
+  my $after_error = $@;
+  block_device_action( 'delete', @remove );
+
+  # a path that stays in sysfs is a stale device that fails as soon as the volume is gone from the array
+  my @left;
+  my $gone = wait_for(
+    sub {
+      @left = grep { -e "$SYSFS_BLOCK/$_" } @remove;
+      return !@left;
+    },
+    "paths of volume \"$volname\" to disappear: " . join( ' ', @remove ),
+    $PATH_REMOVAL_TIMEOUT,
+    undef,
+    1
+  );
+  my $left_error = !$gone ? "paths of volume \"$volname\" are still present after the removal: " . join( ' ', @left ) . "\n" : '';
+
+  die $after_error unless $after_ok;
+  die $left_error if $left_error;
 
   $logger->( P_DEBUG, "Device \"$wwid\" is removed.", $scfg );
   return 1;
@@ -2605,9 +2678,8 @@ sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   $logger->( P_DEBUG, "deactivate_volume", $scfg );
 
-  $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
-
-  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 );
+  # the array disconnect is the callback of the removal: it runs between the paths going offline and their deletion
+  $class->purestorage_unmap_volume( $storeid, $scfg, $volname, sub { $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 ) } );
 
   $logger->( P_INFO, "Volume \"$volname\" is deactivated.", $scfg );
 
