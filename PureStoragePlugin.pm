@@ -1853,23 +1853,28 @@ sub purestorage_pgroup_parent_name {
 
   my $snap_name = $snap_row->{ name } // '';
   return undef unless length( $source_name // '' ) && length( $snap_name );
-  my $tail = '.' . $source_name;
-  return undef unless length( $snap_name ) > length( $tail );
-  return undef unless substr( $snap_name, -length( $tail ) ) eq $tail;
 
-  # Volume-only snaps are VOL.SUFFIX — parent would equal nothing useful / empty after strip
-  # of a single-segment suffix. Require at least one '.' in the parent (PGROUP.SUFFIX).
-  my $parent = substr( $snap_name, 0, length( $snap_name ) - length( $tail ) );
-  return undef unless index( $parent, '.' ) >= 0;
-  return $parent;
+  # The name of a member snapshot is PGROUP.SUFFIX.VOLUME. For a volume of a pod the array does not repeat the pod in
+  # front of the volume (POD::PGROUP.SUFFIX.VOLUME), so the volume is tried with and without it.
+  foreach my $volume ( $source_name, $source_name =~ /::(.+)$/ ? $1 : () ) {
+    my $tail = '.' . $volume;
+    next unless length( $snap_name ) > length( $tail );
+    next unless substr( $snap_name, -length( $tail ) ) eq $tail;
+
+    # Volume-only snaps are VOL.SUFFIX — parent would equal nothing useful / empty after strip
+    # of a single-segment suffix. Require at least one '.' in the parent (PGROUP.SUFFIX).
+    my $parent = substr( $snap_name, 0, length( $snap_name ) - length( $tail ) );
+    return $parent if index( $parent, '.' ) >= 0;
+  }
+  return undef;
 }
 
-# PVE snapshot names disallow '.'; sanitize parent PGROUP.SUFFIX → PGROUP-SUFFIX.
+# PVE snapshot names disallow '.' and ':' (the pod of a group is named POD::PGROUP): sanitize parent PGROUP.SUFFIX → PGROUP-SUFFIX.
 sub purestorage_pve_snapname_from_parent {
   my ( $parent ) = @_;
   return undef unless length( $parent // '' );
   my $name = $parent;
-  $name =~ s/\./-/g;
+  $name =~ s/[.:]/-/g;
   return $name;
 }
 
@@ -1879,12 +1884,15 @@ sub purestorage_pg_description_parent {
   return $1;
 }
 
-# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }.
+# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }. A name of a pod carries "::" (no space after
+# the colon), the separator of a pair is ": ".
 sub purestorage_pg_description_members {
   my ( $description ) = @_;
   my %members;
   return \%members unless defined $description && $description =~ /^PG:/;
-  while ( $description =~ /;\s*([^:;]+):\s*([^;]+)/g ) {
+  my ( undef, @pairs ) = split( /;\s*/, $description );
+  foreach my $pair ( @pairs ) {
+    next unless $pair =~ /^(.+?):\s+(.+)$/;
     my ( $vol, $snap ) = ( $1, $2 );
     $vol  =~ s/^\s+|\s+$//g;
     $snap =~ s/^\s+|\s+$//g;
@@ -1893,7 +1901,9 @@ sub purestorage_pg_description_members {
   return \%members;
 }
 
-# Build a PVE snapshot config entry without clobbering description/parent.
+# Build a PVE snapshot config entry without clobbering description/parent. A drive of $storeid that is not among the
+# volumes of the snapshot ($snap_volnames, unknown: every drive stays) was added after it and stays out: a rollback has no
+# member to restore it from.
 sub purestorage_snapshot_entry_from_conf {
   my ( $conf, $snaptime, $description ) = @_;
   my $entry = {
