@@ -1812,14 +1812,12 @@ sub purestorage_snap_volume_delete {
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   $logger->( P_INFO, "Volume \"$volname\" snapshot \"$snap_name\" is $message.", $scfg );
 
-  #FIXME: Pure FA API states that replication_snapshot is query (not body) parameter
   $action = {
     name   => 'eradicate volume snapshot',
     type   => 'volume-snapshots',
     method => 'DELETE',
     ignore => [ 'No such volume or snapshot.', 'Eradication is disabled.' ],
-    params => $params,
-    body   => { replication_snapshot => \1 }
+    params => $params
   };
   $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
