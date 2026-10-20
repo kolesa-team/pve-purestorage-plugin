@@ -166,10 +166,10 @@ def run_test(cfg: dict, node: str, name: str, timeout: int, suite_dir: str) -> t
   ok = sum(1 for l in lines if l.startswith("ok"))
   not_ok = [l for l in lines if l.startswith("not ok")]
   skip = next((l for l in lines if "# SKIP" in l), None)
-  if skip:
-    status = "SKIP"
-  elif not_ok or done.returncode:
+  if not_ok or done.returncode:
     status = "FAIL"
+  elif skip:
+    status = "SKIP"
   else:
     status = "ok"
   return status, ok, not_ok, skip, done.returncode, lines

@@ -94,4 +94,18 @@ delete $array{ volumes };
 $sync->( $scfg, 'pure' );
 is_deeply( [ keys %{ $PVE::QemuConfig::CONF{ 100 }{ snapshots } } ], [], 'without a list of volumes nothing is imported' );
 
+# --- a group that sorts earlier and gives the same name appears in a later cycle: the entry stays with its group ---
+reset_stand();
+my $group_snap = sub { return { name => "$_[0].vg/vm-100-disk-0", source => { name => 'vg/vm-100-disk-0' } } };
+$array{ 'volume-snapshots' }           = { items => [ $group_snap->( 'a.b-c' ) ] };
+$array{ 'protection-group-snapshots' } = { items => [ { name => 'a.b-c', created => 1710000000000 } ] };
+$sync->( $scfg, 'pure' );
+$array{ 'volume-snapshots' }           = { items => [ $group_snap->( 'a.b-c' ), $group_snap->( 'a-b.c' ) ] };
+$array{ 'protection-group-snapshots' } = { items => [ { name => 'a.b-c', created => 1710000000000 }, { name => 'a-b.c', created => 1710003600000 } ] };
+$sync->( $scfg, 'pure' );
+$snaps = $PVE::QemuConfig::CONF{ 100 }{ snapshots };
+like( $snaps->{ 'a-b-c' }{ description }, qr/^PG: a\.b-c;/, 'the entry keeps the group it was imported for' );
+is( $snaps->{ 'a-b-c' }{ snaptime }, 1710000000, 'and its time' );
+like( $snaps->{ 'a-b-c-20240309-170000' }{ description } // '', qr/^PG: a-b\.c;/, 'the new group gets the name with the time of its snapshot' );
+
 done_testing;

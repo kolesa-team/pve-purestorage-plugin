@@ -23,6 +23,7 @@ use URI::Escape    qw( uri_escape );
 use File::Basename qw( basename dirname );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
+use List::Util     qw( uniq );
 use Fcntl          qw( :flock O_WRONLY O_CREAT O_TRUNC );
 use POSIX          qw( _exit strftime WNOHANG );
 
@@ -685,7 +686,7 @@ sub block_device_paths_by_wwid {
 sub lun_paths {
   my ( $wwid, @slaves ) = @_;
 
-  return sort keys %{ { map { $_ => 1 } ( @slaves, block_device_paths_by_wwid( $wwid ) ) } };
+  return sort( uniq( @slaves, block_device_paths_by_wwid( $wwid ) ) );
 }
 
 # What a device answers to INQUIRY now, in the format of the multipath WWID (the sysfs wwid is cached when the device
@@ -2094,15 +2095,27 @@ sub purestorage_fit_snapname {
   return $name . $tail;
 }
 
-# Groups that give the same Proxmox name (a-b.c and a.b-c both give a-b-c) would overwrite one entry each cycle. The groups
-# are taken in the order of their parents, the first keeps the name and every later one gets the date and time of its
-# snapshot in the name (and a number when even that is taken). A name is never longer than Proxmox accepts: the part before
-# the date is cut, the date stays.
+# Groups that give the same Proxmox name (a-b.c and a.b-c both give a-b-c) would overwrite one entry each cycle. A name that
+# an imported entry holds ($held: name => parent of the group in its description) stays with that group, so that a group
+# that sorts earlier and shows up later does not take it over. The other groups are taken in the order of their parents,
+# the first keeps the name and every later one gets the date and time of its snapshot in the name (and a number when even
+# that is taken). A name is never longer than Proxmox accepts: the part before the date is cut, the date stays.
 sub purestorage_unique_group_names {
-  my ( $groups ) = @_;
+  my ( $groups, $held ) = @_;
 
   my %taken;
-  foreach my $group ( sort { $a->{ parent } cmp $b->{ parent } } @$groups ) {
+  my @unclaimed;
+  foreach my $group ( @$groups ) {
+    my $name = purestorage_fit_snapname( $group->{ pve_name } );
+    if ( ( $held->{ $name } // '' ) eq $group->{ parent } ) {
+      $group->{ pve_name } = $name;
+      $taken{ $name } = 1;
+    } else {
+      push @unclaimed, $group;
+    }
+  }
+
+  foreach my $group ( sort { $a->{ parent } cmp $b->{ parent } } @unclaimed ) {
     my $name = purestorage_fit_snapname( $group->{ pve_name } );
     if ( $taken{ $name } ) {
       my $dated = '-' . purestorage_snapshot_time_suffix( $group->{ snaptime } );
@@ -2374,9 +2387,6 @@ sub purestorage_sync_array_snapshots {
   for my $vmid ( sort { $a <=> $b } keys %vmids_to_touch ) {
     my $groups = purestorage_vmid_groups( $by_vmid{ $vmid } // {}, \%pg_created, $pref_len, $fetch_incomplete );
 
-    purestorage_unique_group_names( $groups );
-    my %keep = map { $_->{ pve_name } => 1 } @$groups;
-
     eval {
       PVE::QemuConfig->lock_config(
         $vmid,
@@ -2384,6 +2394,15 @@ sub purestorage_sync_array_snapshots {
           my $conf = PVE::QemuConfig->load_config( $vmid );
           $conf->{ snapshots } //= {};
           my $changed = 0;
+
+          # the names are taken after the config is read: an entry that holds a name decides who keeps it
+          my %held;
+          foreach my $name ( keys %{ $conf->{ snapshots } } ) {
+            my $parent = purestorage_pg_description_parent( $conf->{ snapshots }{ $name }{ description } );
+            $held{ $name } = $parent if defined $parent;
+          }
+          purestorage_unique_group_names( $groups, \%held );
+          my %keep = map { $_->{ pve_name } => 1 } @$groups;
 
           foreach my $group ( @$groups ) {
             $changed = 1 if purestorage_import_group( $conf, $group, \%keep, $storeid );

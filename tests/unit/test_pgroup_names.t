@@ -102,6 +102,26 @@ is( $fn{ purestorage_pg_description_parent }->( 'user note' ),                  
   is( length( $too_long[0]{ pve_name } ), 40, 'a single group name longer than 40 characters is cut to 40' );
 }
 
+# --- a name that an imported entry holds stays with the group named in its description, whatever sorts first now ---
+{
+  my $name   = $fn{ purestorage_pve_snapname_from_parent };
+  my @groups = map { { parent => $_->[0], pve_name => $name->( $_->[0] ), snaptime => $_->[1] } } ( [ 'a-b.c', 1710003600 ], [ 'a.b-c', 1710000000 ] );
+  $fn{ purestorage_unique_group_names }->( \@groups, { 'a-b-c' => 'a.b-c' } );
+  is_deeply(
+    { map { $_->{ parent } => $_->{ pve_name } } @groups },
+    { 'a.b-c' => 'a-b-c', 'a-b.c' => 'a-b-c-20240309-170000' },
+    'the group that holds the name keeps it although another group with the same name sorts earlier'
+  );
+
+  @groups = map { { parent => $_->[0], pve_name => $name->( $_->[0] ), snaptime => $_->[1] } } ( [ 'a-b.c', 1710003600 ], [ 'a.b-c', 1710000000 ] );
+  $fn{ purestorage_unique_group_names }->( \@groups, { 'a-b-c' => 'x.y' } );
+  is_deeply(
+    { map { $_->{ parent } => $_->{ pve_name } } @groups },
+    { 'a-b.c' => 'a-b-c', 'a.b-c' => 'a-b-c-20240309-160000' },
+    'a name held by a group that is not among these ones goes through the sorting'
+  );
+}
+
 # --- the name of a member snapshot of a group in a pod, as the array gives it: the pod is not repeated in front of the volume ---
 is(
   $fn{ purestorage_pgroup_parent_name }->( { name => 'proxmox-pgroup-test-pod::pgpod.1.vm-9992-disk-0' }, 'proxmox-pgroup-test-pod::vm-9992-disk-0' ),
