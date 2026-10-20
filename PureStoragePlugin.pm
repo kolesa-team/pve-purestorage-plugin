@@ -20,11 +20,11 @@ use LWP::UserAgent ();
 use HTTP::Headers  ();
 use HTTP::Request  ();
 use URI::Escape    qw( uri_escape );
-use File::Basename qw( basename );
+use File::Basename qw( basename dirname );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
-use Fcntl          qw( :flock );
-use POSIX          qw( _exit );
+use Fcntl          qw( :flock O_WRONLY O_CREAT O_TRUNC );
+use POSIX          qw( _exit strftime WNOHANG );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -48,6 +48,13 @@ use constant {
   TOKEN_STATE_NEEDED => 1,      # Need to obtain session token
   TOKEN_STATE_CACHED => 2,      # Have valid cached session token
 };
+
+our $SYSFS_BLOCK          = '/sys/block';            # a package variable so that unit tests can point it at a fake tree
+our $PATH_REMOVAL_TIMEOUT = 10;                      # seconds the kernel gets to drop the deleted paths
+our $STATUS_MARKER_DIR    = '/run/pve-purestorage'
+  ;    # the state of the plugin on this node (a failed status, the protection-group sync); a package variable so that unit tests can point it elsewhere
+our $STATUS_BACKOFF  = 30;    # seconds a storage stays inactive after a failed status
+our $STALE_PATH_WAIT = 3;     # seconds a new volume gets to appear before stale devices are looked for
 
 my $PSFA_API               = '2.26';
 my $purestorage_wwn_prefix = '3624a9370';
@@ -251,6 +258,7 @@ my $cmd = {
   #  fuser      => '/usr/bin/fuser',
   multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
+  scsi_id    => '/lib/udev/scsi_id',
   blockdev   => '/usr/sbin/blockdev',
   dmsetup    => '/sbin/dmsetup',
   kpartx     => '/sbin/kpartx',
@@ -379,7 +387,7 @@ sub multipath_check {
 }
 
 sub wait_for {
-  my ( $success, $message, $timeout, $delay ) = @_;
+  my ( $success, $message, $timeout, $delay, $nonfatal ) = @_;
 
   my $debug = 'Debug :: Waiting for ' . $message;
 
@@ -409,6 +417,8 @@ sub wait_for {
   $logger->( P_VERB,  $debug,                      undef );
   $logger->( P_DEBUG, ": timeout after $time sec", undef );
 
+  # a caller that expects the wait to fail now and then (and handles it) gets false, not an error in the task log
+  return 0 if $nonfatal;
   $fatal->( "Timeout while waiting for $message", undef );
 }
 
@@ -544,7 +554,7 @@ sub get_device_size {
   my ( $device ) = @_;
   $logger->( P_DEBUG, "get_device_size($device)", undef );
 
-  my $path = '/sys/block/' . basename( $device ) . '/size';
+  my $path = "$SYSFS_BLOCK/" . basename( $device ) . '/size';
   my $size = file_read_firstline( $path ) << 9;
 
   $logger->( P_DEBUG, "Device \"$device\" size is $size bytes", undef );
@@ -554,9 +564,16 @@ sub get_device_size {
 sub device_op {
   my ( $device_path, $op, $value ) = @_;
 
-  open( my $fh, '>', $device_path . '/' . $op ) or $fatal->( "Could not open file \"$device_path/$op\" for writing.", undef );
-  print $fh $value;
+  my $file = $device_path . '/' . $op;
+
+  sysopen( my $fh, $file, O_WRONLY ) or $fatal->( "Could not open file \"$file\" for writing.", undef );
+
+  # unbuffered, so that a refusal of the kernel is seen here and not lost on close; the state file refuses
+  # "offline" without the trailing newline
+  my $written = syswrite( $fh, "$value\n" );
+  my $error   = $!;
   close( $fh );
+  $logger->( P_WARN, "Kernel refused '$value' for \"$file\": $error", undef ) unless defined $written;
 }
 
 sub block_device_action {
@@ -569,11 +586,19 @@ sub block_device_action {
       next;
     }
     $device = $1;    # untaint
-    my $device_path = '/sys/block/' . $device . '/device';
-    if ( $action eq 'remove' ) {
-      $logger->( P_DEBUG, "Removing device: $device", undef );
-      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ] );
-      device_op( $device_path, 'state',  'offline' );
+    my $device_path = $SYSFS_BLOCK . '/' . $device . '/device';
+
+    # a path that is already gone needs nothing, and must not stop the cleanup of the paths after it
+    if ( !-e $device_path ) {
+      $logger->( P_DEBUG, "Device $device is already gone, skipping $action", undef );
+      next;
+    }
+    if ( $action eq 'offline' ) {
+      $logger->( P_DEBUG, "Taking device offline: $device", undef );
+      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ], 0 );
+      device_op( $device_path, 'state', 'offline' );
+    } elsif ( $action eq 'delete' ) {
+      $logger->( P_DEBUG, "Deleting device: $device", undef );
       device_op( $device_path, 'delete', '1' );
     } elsif ( $action eq 'rescan' ) {
       $logger->( P_DEBUG, "Rescanning: $device", undef );
@@ -582,6 +607,93 @@ sub block_device_action {
       $fatal->( "Unsupported action in block_device_action() => $action", undef );
     }
   }
+}
+
+# The WWID in the format sysfs shows ("naa." and 32 hex digits) and in the format of multipath ("3" and the same digits).
+sub sysfs_wwid {
+  my ( $wwid ) = @_;
+
+  return 'naa.' . substr( lc( $wwid ), -32 );
+}
+
+sub multipath_wwid {
+  my ( $sysfs_wwid ) = @_;
+
+  return '3' . substr( lc( $sysfs_wwid ), 4 );
+}
+
+# The WWID sysfs has cached for every SCSI disk (disk name => WWID), the one the kernel read when it created the disk.
+# With a LUN only the disks on it are read.
+sub cached_wwids {
+  my ( $lun ) = @_;
+
+  my %wwids;
+  foreach my $file ( glob( "$SYSFS_BLOCK/sd*/device/wwid" ) ) {
+    my $disk = basename( dirname( dirname( $file ) ) );
+    next if defined( $lun ) && ( scsi_device_lun( $disk ) // '' ) ne $lun;
+    my $wwid = file_read_firstline( $file ) // next;
+    $wwids{ $disk } = lc( $wwid );
+  }
+  return %wwids;
+}
+
+# Every path (SCSI disk) of a volume, found by its WWID. The by-id link can point at a single path while the
+# multipath map is not up, so it is not enough to find all of them.
+sub block_device_paths_by_wwid {
+  my ( $wwid ) = @_;
+
+  my %wwids = cached_wwids();
+  return grep { $wwids{ $_ } eq sysfs_wwid( $wwid ) } keys %wwids;
+}
+
+# Every path of a volume: the slaves found through the by-id link and the paths found by the WWID, each listed once.
+sub lun_paths {
+  my ( $wwid, @slaves ) = @_;
+
+  return sort keys %{ { map { $_ => 1 } ( @slaves, block_device_paths_by_wwid( $wwid ) ) } };
+}
+
+# What a device answers to INQUIRY now, in the format of the multipath WWID (the sysfs wwid is cached when the device
+# is created and a host scan does not read it again). Undef when the device does not answer.
+sub scsi_live_wwid {
+  my ( $disk ) = @_;
+
+  my $wwid = '';
+  eval {
+    run_command( [ get_command_path( 'scsi_id' ), '-g', '-u', "/dev/$disk" ], outfunc => sub { $wwid .= $_[0] }, errfunc => sub { }, timeout => 5 );
+  };
+  return $@ || !length( $wwid ) ? undef : lc( $wwid );
+}
+
+sub scsi_device_lun {
+  my ( $disk ) = @_;
+
+  my $link = readlink( "$SYSFS_BLOCK/$disk/device" );
+  return defined( $link ) && basename( $link ) =~ /:(\d+)$/ ? $1 : undef;
+}
+
+# The array gives the LUN number of a removed volume to the next volume. A device of the old volume that is still on
+# that LUN keeps the old WWID in sysfs, so the new volume does not appear there. A Pure device whose live WWID differs
+# from the cached one is rescanned and becomes a path of the new volume. A device that does not answer is left alone:
+# a path that is down is not a proof of a reused LUN. With a LUN only the devices on it are checked.
+sub heal_stale_paths {
+  my ( $wwid, $lun ) = @_;
+
+  my $pure = 'naa.' . substr( $purestorage_wwn_prefix, 1 );
+  my @healed;
+  my %wwids = cached_wwids( $lun );
+  foreach my $disk ( sort keys %wwids ) {
+    my $cached = $wwids{ $disk };
+    next if index( $cached, $pure ) != 0 || $cached eq sysfs_wwid( $wwid );
+
+    my $live = scsi_live_wwid( $disk ) // next;
+    next if $live eq multipath_wwid( $cached );
+
+    $logger->( P_WARN, "Device \"$disk\" still has the WWID $cached of a removed volume, it answers $live: rescanning", undef );
+    block_device_action( 'rescan', $disk );
+    push @healed, $disk;
+  }
+  return @healed;
 }
 
 sub block_device_slaves {
@@ -594,7 +706,7 @@ sub block_device_slaves {
   $logger->( P_DEBUG, "Device path resolved to \"$device_path\".", undef );
 
   my $device_name = basename( $device_path );
-  my $slaves_path = '/sys/block/' . $device_name . '/slaves';
+  my $slaves_path = "$SYSFS_BLOCK/$device_name/slaves";
 
   my @slaves;
   if ( -d $slaves_path ) {
