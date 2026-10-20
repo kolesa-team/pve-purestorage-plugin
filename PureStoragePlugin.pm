@@ -1905,7 +1905,7 @@ sub purestorage_pg_description_members {
 # volumes of the snapshot ($snap_volnames, unknown: every drive stays) was added after it and stays out: a rollback has no
 # member to restore it from.
 sub purestorage_snapshot_entry_from_conf {
-  my ( $conf, $snaptime, $description ) = @_;
+  my ( $conf, $snaptime, $description, $storeid, $snap_volnames ) = @_;
   my $entry = {
     snaptime    => $snaptime,
     description => $description,
@@ -1914,6 +1914,7 @@ sub purestorage_snapshot_entry_from_conf {
   for my $k ( keys %$conf ) {
     next if $skip{ $k };
     next if ref( $conf->{ $k } );
+    next if defined( $storeid ) && $snap_volnames && $conf->{ $k } =~ /^\Q$storeid\E:([^,]+)/ && !$snap_volnames->{ $1 };
     $entry->{ $k } = $conf->{ $k };
   }
   return $entry;
@@ -2016,13 +2017,15 @@ sub purestorage_reap_sync_children {
 # Schedule pgroup sync outside status(): non-blocking lock + fork so pvestatd is not stalled.
 sub purestorage_maybe_schedule_pgroup_sync {
   my ( $scfg, $storeid ) = @_;
+  purestorage_reap_sync_children();
   return unless $scfg->{ pgroup_sync };
 
   my $interval = $scfg->{ pgroup_sync_interval } // 60;
   $interval = 30 if $interval < 30;
 
-  my $ts_file   = "/var/run/pve-pure-sync-${storeid}.ts";
-  my $lock_file = "/var/run/pve-pure-sync-${storeid}.lock";
+  my $ts_file   = "$STATUS_MARKER_DIR/sync-${storeid}.ts";
+  my $lock_file = "$STATUS_MARKER_DIR/sync-${storeid}.lock";
+  eval { File::Path::make_path( $STATUS_MARKER_DIR, { mode => 0700 } ) };
 
   open( my $lf, '>>', $lock_file ) or return;
   flock( $lf, LOCK_EX | LOCK_NB )  or do { close $lf; return; };
@@ -2064,11 +2067,181 @@ sub purestorage_maybe_schedule_pgroup_sync {
     _exit( 0 );
   }
 
+  purestorage_track_sync_child( $pid );
   close $lf;    # child's inherited FD still holds the exclusive lock
   return;
 }
 
+# "YYYYMMDD-HHMMSS" (UTC) of a snapshot time: the part of a Proxmox snapshot name that tells two snapshots with the same
+# name apart. UTC, so that every node of a cluster makes the same name.
+sub purestorage_snapshot_time_suffix {
+  my ( $snaptime ) = @_;
+
+  return strftime( '%Y%m%d-%H%M%S', gmtime( $snaptime ) );
+}
+
+# Longest snapshot name Proxmox accepts in an API call (clone, rollback, delete): the pve-snapshot-name type.
+our $PVE_SNAPNAME_MAX = 40;
+
+# $base cut so that $base . $tail is not longer than $PVE_SNAPNAME_MAX.
+sub purestorage_fit_snapname {
+  my ( $base, $tail ) = @_;
+
+  $tail //= '';
+  my $name = substr( $base, 0, $PVE_SNAPNAME_MAX - length( $tail ) );
+  $name =~ s/-+$// if length( $tail );    # the tail brings its own dash
+  return $name . $tail;
+}
+
+# Groups that give the same Proxmox name (a-b.c and a.b-c both give a-b-c) would overwrite one entry each cycle. The groups
+# are taken in the order of their parents, the first keeps the name and every later one gets the date and time of its
+# snapshot in the name (and a number when even that is taken). A name is never longer than Proxmox accepts: the part before
+# the date is cut, the date stays.
+sub purestorage_unique_group_names {
+  my ( $groups ) = @_;
+
+  my %taken;
+  foreach my $group ( sort { $a->{ parent } cmp $b->{ parent } } @$groups ) {
+    my $name = purestorage_fit_snapname( $group->{ pve_name } );
+    if ( $taken{ $name } ) {
+      my $dated = '-' . purestorage_snapshot_time_suffix( $group->{ snaptime } );
+      my $n     = 1;
+      my $try;
+      do { $try = purestorage_fit_snapname( $name, $n > 1 ? "$dated-$n" : $dated ); ++$n } while ( $taken{ $try } );
+      $name = $try;
+    }
+    $group->{ pve_name } = $name;
+    $taken{ $name } = 1;
+  }
+  return $groups;
+}
+
+# Imports one protection-group snapshot into the snapshots of a VM config, returns 1 when the config changed. A snapshot
+# is ours only when its description names a protection group: a snapshot of the user with the same name, with an empty
+# description too, stays as it is and the group is imported under a name with the snapshot time.
+sub purestorage_import_group {
+  my ( $conf, $group, $keep, $storeid ) = @_;
+
+  my $psnaps     = $conf->{ snapshots } //= {};
+  my $pve_name   = $group->{ pve_name };
+  my $want_desc  = $group->{ description } // '';
+  my $final_name = $pve_name;
+
+  if ( exists $psnaps->{ $pve_name } ) {
+    my $cur = $psnaps->{ $pve_name }{ description };
+    $cur = defined $cur ? "$cur" : '';
+    if ( defined( purestorage_pg_description_parent( $cur ) ) ) {
+      my $changed = 0;
+      if ( length $want_desc && $cur ne $want_desc ) {
+        $psnaps->{ $pve_name }{ description } = $want_desc;
+        $changed = 1;
+      }
+      my $old_st = $psnaps->{ $pve_name }{ snaptime };
+      $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
+      if ( $old_st <= 0 && $group->{ snaptime } > 0 ) {
+        $psnaps->{ $pve_name }{ snaptime } = $group->{ snaptime };
+        $changed = 1;
+      }
+      return $changed;
+    }
+
+    # Name taken by a snapshot that is not imported: unique fallback. Registered as kept before the early return,
+    # so later cycles do not prune and recreate it.
+    $final_name = purestorage_fit_snapname( $pve_name, '-' . purestorage_snapshot_time_suffix( $group->{ snaptime } ) );
+    $keep->{ $final_name } = 1;
+    return 0 if exists $psnaps->{ $final_name };
+  }
+
+  $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $group->{ snaptime }, $want_desc, $storeid, $group->{ volnames } );
+  return 1;
+}
+
+# Removes a snapshot from a VM config the way Proxmox does it: whatever had it as its parent gets the parent of the removed
+# snapshot (or none), so that no parent points at a snapshot that is gone.
+sub purestorage_remove_snapshot_entry {
+  my ( $conf, $name ) = @_;
+
+  my $snapshots = $conf->{ snapshots };
+  my $parent    = $snapshots->{ $name }{ parent };
+  delete $snapshots->{ $name };
+  foreach my $entry ( $conf, values %$snapshots ) {
+    next unless ( $entry->{ parent } // '' ) eq $name;
+    if ( $parent ) {
+      $entry->{ parent } = $parent;
+    } else {
+      delete $entry->{ parent };
+    }
+  }
+}
+
 # Import protection-group snapshots into QEMU VM configs (Nimble-style sync).
+# The protection-group snapshots of one VM as groups for purestorage_import_group. $parents is parent => { volume => member
+# snapshot name }; a group with no member is left out.
+sub purestorage_vmid_groups {
+  my ( $parents, $pg_created, $pref_len, $fetch_incomplete ) = @_;
+
+  my @groups;
+  for my $parent ( sort keys %$parents ) {
+    my $members = $parents->{ $parent };
+
+    # Historical completeness: accept any non-empty member set from the snapshot itself. Do not require every *current*
+    # VM volume (e.g. a cloudinit disk added later) to be present in past pgroup snaps.
+    next unless $members && keys %$members;
+
+    my $pve_name = purestorage_pve_snapname_from_parent( $parent );
+    next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+    my $created_ms = $pg_created->{ $parent };
+    my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
+
+    my @parts = ( "PG: $parent" );
+    push @parts, map { "$_: $members->{$_}" } sort keys %$members;
+    push @groups, {
+      pve_name    => $pve_name,
+      parent      => $parent,
+      snaptime    => $snaptime,
+      description => join( '; ', @parts ),
+
+      # unknown when the fetch was incomplete: a missing member may only be a missing row
+      volnames => $fetch_incomplete ? undef : { map { ( $pref_len ? substr( $_, $pref_len ) : $_ ) => 1 } keys %$members },
+    };
+  }
+  return \@groups;
+}
+
+# True when an imported snapshot entry belongs to VM $vmid on this storage: its description names a volume of the VM, one
+# that exists now or one that was removed since the import.
+sub purestorage_group_entry_is_ours {
+  my ( $description, $vmid, $vol_map, $pref ) = @_;
+
+  my $pref_len = length( $pref );
+  for my $fvn ( keys %{ purestorage_pg_description_members( $description ) } ) {
+    return 1 if exists $vol_map->{ $fvn } && $vol_map->{ $fvn }{ vmid } eq $vmid;
+    my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
+    return 1 if $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/;
+  }
+  return 0;
+}
+
+# Removes the imported entries of VM $vmid whose group snapshot is gone from the array ($keep holds the names that are still
+# there). Returns 1 when the config changed.
+sub purestorage_prune_vanished_groups {
+  my ( $conf, $vmid, $keep, $vol_map, $pref ) = @_;
+
+  my $changed = 0;
+  my $psnaps  = $conf->{ snapshots };
+  for my $sname ( keys %$psnaps ) {
+    next if $keep->{ $sname };
+    my $desc = $psnaps->{ $sname }{ description };
+    $desc = defined $desc ? "$desc" : '';
+    next unless defined( purestorage_pg_description_parent( $desc ) );
+    next unless purestorage_group_entry_is_ours( $desc, $vmid, $vol_map, $pref );
+    purestorage_remove_snapshot_entry( $conf, $sname );
+    $changed = 1;
+  }
+  return $changed;
+}
+
 sub purestorage_sync_array_snapshots {
   my ( $scfg, $storeid ) = @_;
 
@@ -2118,8 +2291,7 @@ sub purestorage_sync_array_snapshots {
   for my $name ( keys %vol_map ) {
     my $vmid = $vol_map{ $name }{ vmid };
     next if exists $vmid_is_qemu{ $vmid };
-    my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
-    $vmid_is_qemu{ $vmid } = ( !$@ && ref( $conf ) eq 'HASH' ) ? 1 : 0;
+    $vmid_is_qemu{ $vmid } = -f PVE::QemuConfig->config_file( $vmid ) ? 1 : 0;
   }
   for my $name ( keys %vol_map ) {
     delete $vol_map{ $name } unless $vmid_is_qemu{ $vol_map{ $name }{ vmid } };
@@ -2199,106 +2371,24 @@ sub purestorage_sync_array_snapshots {
   my %vmids_to_touch = map { $vol_map{ $_ }{ vmid } => 1 } keys %vol_map;
 
   for my $vmid ( sort { $a <=> $b } keys %vmids_to_touch ) {
-    my @groups;
+    my $groups = purestorage_vmid_groups( $by_vmid{ $vmid } // {}, \%pg_created, $pref_len, $fetch_incomplete );
 
-    for my $parent ( sort keys %{ $by_vmid{ $vmid } // {} } ) {
-      my $members = $by_vmid{ $vmid }{ $parent };
-
-      # Historical completeness: accept any non-empty member set from the
-      # snapshot itself. Do not require every *current* VM volume (e.g. a
-      # cloudinit disk added later) to be present in past pgroup snaps.
-      next unless $members && keys %$members;
-
-      my $pve_name = purestorage_pve_snapname_from_parent( $parent );
-      next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
-
-      my $created_ms = $pg_created{ $parent };
-      my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
-
-      my @parts = ( "PG: $parent" );
-      for my $fvn ( sort keys %$members ) {
-        push @parts, "$fvn: $members->{$fvn}";
-      }
-      push @groups,
-        {
-          pve_name    => $pve_name,
-          parent      => $parent,
-          snaptime    => $snaptime,
-          description => join( '; ', @parts ),
-        };
-    }
-
-    my %keep = map { $_->{ pve_name } => 1 } @groups;
+    purestorage_unique_group_names( $groups );
+    my %keep = map { $_->{ pve_name } => 1 } @$groups;
 
     eval {
       PVE::QemuConfig->lock_config(
         $vmid,
         sub {
-          my $conf    = PVE::QemuConfig->load_config( $vmid );
-          my $psnaps  = $conf->{ snapshots } //= {};
+          my $conf = PVE::QemuConfig->load_config( $vmid );
+          $conf->{ snapshots } //= {};
           my $changed = 0;
 
-          for my $g ( @groups ) {
-            my $pve_name   = $g->{ pve_name };
-            my $want_desc  = $g->{ description } // '';
-            my $final_name = $pve_name;
-
-            if ( exists $psnaps->{ $pve_name } ) {
-              my $cur = $psnaps->{ $pve_name }{ description };
-              $cur = defined $cur ? "$cur" : '';
-              my $ours = defined( purestorage_pg_description_parent( $cur ) ) || $cur eq '';
-              if ( $ours ) {
-                if ( length $want_desc && $cur ne $want_desc ) {
-                  $psnaps->{ $pve_name }{ description } = $want_desc;
-                  $changed = 1;
-                }
-                my $old_st = $psnaps->{ $pve_name }{ snaptime };
-                $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
-                if ( $old_st <= 0 && $g->{ snaptime } > 0 ) {
-                  $psnaps->{ $pve_name }{ snaptime } = $g->{ snaptime };
-                  $changed = 1;
-                }
-                next;
-              }
-
-              # Name taken by a non-imported snap — unique fallback.
-              # Register keep before next so later cycles do not prune/recreate.
-              $final_name = $pve_name . '-' . $g->{ snaptime };
-              $keep{ $final_name } = 1;
-              next if exists $psnaps->{ $final_name };
-            }
-
-            $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $g->{ snaptime }, $want_desc );
-            $changed = 1;
+          foreach my $group ( @$groups ) {
+            $changed = 1 if purestorage_import_group( $conf, $group, \%keep, $storeid );
           }
 
-          if ( !$fetch_incomplete ) {
-            for my $sname ( keys %$psnaps ) {
-              next if $keep{ $sname };
-              my $desc = $psnaps->{ $sname }{ description };
-              $desc = defined $desc ? "$desc" : '';
-              next unless defined( purestorage_pg_description_parent( $desc ) );
-
-              # Ours if the stored member list names any volume for this vmid
-              # on this storage (current or removed since import).
-              my $members = purestorage_pg_description_members( $desc );
-              my $ours    = 0;
-              for my $fvn ( keys %$members ) {
-                if ( exists $vol_map{ $fvn } && $vol_map{ $fvn }{ vmid } eq $vmid ) {
-                  $ours = 1;
-                  last;
-                }
-                my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
-                if ( $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/ ) {
-                  $ours = 1;
-                  last;
-                }
-              }
-              next unless $ours;
-              delete $psnaps->{ $sname };
-              $changed = 1;
-            }
-          }
+          $changed = 1 if !$fetch_incomplete && purestorage_prune_vanished_groups( $conf, $vmid, \%keep, \%vol_map, $pref );
 
           if ( $changed ) {
             PVE::QemuConfig->write_config( $vmid, $conf );
