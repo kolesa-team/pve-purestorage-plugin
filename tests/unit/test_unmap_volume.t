@@ -88,4 +88,25 @@ like( $@, qr/sdg sdh/, 'the error names the paths that are left' );
 $keep_paths = 0;
 rmdir "$sysfs/$_" for qw( sdg sdh );
 
+# The kernel gives the name of a deleted path to the next volume at once. A name in sysfs that carries the WWID of
+# another volume is not a leftover of this one.
+sub write_wwid {
+  my ( $disk, $wwid ) = @_;
+  make_path( "$sysfs/$disk/device" );
+  open( my $fh, '>', "$sysfs/$disk/device/wwid" ) or die $!;
+  print $fh "$wwid\n";
+  close $fh;
+}
+$keep_paths = 1;
+@paths      = qw( sdg sdh );
+write_wwid( $_, 'naa.624a9370ffffffffffffffff00000001' ) for @paths;    # paths of the next volume now
+@events = ();
+ok( eval { $plugin->deactivate_volume( 'pure', {}, 'vm-100-disk-0' ); 1 }, 'names that carry the WWID of another volume are not leftovers' ) or diag( $@ );
+
+write_wwid( $_, 'naa.624a93708476f68c18374e7700016a84' ) for @paths;    # still the paths of this volume
+ok( !eval { $plugin->deactivate_volume( 'pure', {}, 'vm-100-disk-0' ); 1 }, 'paths that still carry the WWID of the volume are leftovers' );
+like( $@, qr/sdg sdh/, 'and are named' );
+$keep_paths = 0;
+system( 'rm', '-rf', "$sysfs/sdg", "$sysfs/sdh" );
+
 done_testing;

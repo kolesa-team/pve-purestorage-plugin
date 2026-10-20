@@ -2741,6 +2741,16 @@ sub unmap_volume {
   return $class->purestorage_unmap_volume( $storeid, $scfg, $volname );
 }
 
+# True when the device $disk in sysfs is still a path of the volume with $wwid. The kernel hands the name of a deleted path
+# to the next volume at once, and that one is not ours; a device that does not tell its WWID counts as ours.
+sub path_is_still_of {
+  my ( $disk, $wwid ) = @_;
+
+  return 0 unless -e "$SYSFS_BLOCK/$disk";
+  my $cached = file_read_firstline( "$SYSFS_BLOCK/$disk/device/wwid" );
+  return !defined( $cached ) || lc( $cached ) eq sysfs_wwid( $wwid );
+}
+
 # Removes the local paths of a volume. iscsid rescans the sessions regularly and brings a removed path back
 # while the volume is still connected on the array, and such a path fails once the array disconnects the volume.
 # So every path goes offline first, $after_offline runs (the array disconnect), and only then the paths are
@@ -2791,7 +2801,7 @@ sub purestorage_unmap_volume {
   my @left;
   my $gone = wait_for(
     sub {
-      @left = grep { -e "$SYSFS_BLOCK/$_" } @remove;
+      @left = grep { path_is_still_of( $_, $wwid ) } @remove;
       return !@left;
     },
     "paths of volume \"$volname\" to disappear: " . join( ' ', @remove ),
