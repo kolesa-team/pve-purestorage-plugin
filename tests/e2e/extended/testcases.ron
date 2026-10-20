@@ -50,5 +50,13 @@ TestcaseConfig(
             tag: "storage-plugin",
             capability: "a volume on a LUN number whose old SCSI device stayed on the node (stale device after a failed deactivation)",
         ),
+        Testcase(
+            name: "extended_guest_lvm_holder",
+            run: "./tests/guest_lvm_holder.pl",
+            timeout: 900,
+            instances: [],
+            tag: "storage-plugin",
+            capability: "deactivation of a volume whose guest LVM the host activated on top of the multipath map (udev pvscan)",
+        ),
     ],
 )
