@@ -37,7 +37,7 @@ FIXED_NAME_TESTS = {"io_integrity", "disk_thin_discard"}
 # would take the errors of another test for their own), or provoke the plugin errors that those tests would take
 SERIAL_TESTS = FIXED_NAME_TESTS | {"migration_under_load", "hard_stop_integrity", "volume_lifecycle_loop", "unmap_busy_map", "stale_lun_heal"}
 # what a test says when it lost the race for a VM id against a test that runs next to it: only such a failure is repeated
-RACE_MARKS = ("already exists", "File exists", "can't lock file")
+RACE_MARKS = ("already exists", "File exists", "can't lock file", "start worker failed")
 # tests that migrate the guest to another node and so start on the node with the oldest QEMU, the first of NODES: a guest
 # started on a newer node gets a machine type the older one cannot run
 FIRST_NODE_ONLY = {"migration_under_load"}
