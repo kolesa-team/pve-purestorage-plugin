@@ -57,6 +57,8 @@ The package installs the udev rules file `68-pure-storage.rules` into `/usr/lib/
 - A rule that keeps LVM of the host away from the multipath maps of Pure volumes. Without it the host may activate the volume group that a guest keeps on its disk, and the volume cannot be deactivated afterwards, see [LVM inside a volume](troubleshooting.md#known-issues). The file must be read before `69-lvm.rules`. The rule also applies to LVM that you run on a Pure volume on the host: its volume groups are not activated by udev, activate them with `vgchange -ay`.
 - The kernel settings that Pure recommends for FlashArray volumes (`none` scheduler, `add_random`, `rq_affinity`, SCSI timeout, `max_sectors_kb`), see the Linux recommended settings of Pure. They are applied by the same file, so a file with these settings that you install yourself (for example `99-pure-storage.rules`) only repeats them.
 
+To turn the file off on a node, mask it with a symlink to `/dev/null` of the same name: `ln -s /dev/null /etc/udev/rules.d/68-pure-storage.rules` (a file in `/etc/udev/rules.d` replaces the packaged one of the same name, and a symlink to `/dev/null` disables the rules, see `udev(7)`; an empty file of the same name does the same), then run `udevadm control --reload-rules`.
+
 ### iSCSI Configuration
 
 Initiate iSCSI according to the Proxmox Guidelines.
