@@ -20,11 +20,12 @@ use LWP::UserAgent ();
 use HTTP::Headers  ();
 use HTTP::Request  ();
 use URI::Escape    qw( uri_escape );
-use File::Basename qw( basename );
+use File::Basename qw( basename dirname );
 use Time::HiRes    qw( gettimeofday sleep );
 use Cwd            qw( abs_path );
-use Fcntl          qw( :flock );
-use POSIX          qw( _exit );
+use List::Util     qw( uniq );
+use Fcntl          qw( :flock O_WRONLY O_CREAT O_TRUNC );
+use POSIX          qw( _exit strftime WNOHANG );
 
 use base qw(PVE::Storage::Plugin);
 
@@ -48,6 +49,13 @@ use constant {
   TOKEN_STATE_NEEDED => 1,      # Need to obtain session token
   TOKEN_STATE_CACHED => 2,      # Have valid cached session token
 };
+
+our $SYSFS_BLOCK          = '/sys/block';            # a package variable so that unit tests can point it at a fake tree
+our $PATH_REMOVAL_TIMEOUT = 10;                      # seconds the kernel gets to drop the deleted paths
+our $STATUS_MARKER_DIR    = '/run/pve-purestorage'
+  ;    # the state of the plugin on this node (a failed status, the protection-group sync); a package variable so that unit tests can point it elsewhere
+our $STATUS_BACKOFF  = 30;    # seconds a storage stays inactive after a failed status
+our $STALE_PATH_WAIT = 3;     # seconds a new volume gets to appear before stale devices are looked for
 
 my $PSFA_API               = '2.26';
 my $purestorage_wwn_prefix = '3624a9370';
@@ -129,9 +137,10 @@ sub api {
 # PVE 9:   APIVER 13 / hints parameters and on_update_hook_full
 # PVE 9:   APIVER 14 / get_identity (optional; we return FlashArray id)
 # PVE 9:   APIVER 15 / volume_resize($snapname); volume_snapshot_info virtual-size
+# PVE 9:   APIVER 16 / optional volume name and format helper methods (the plugin uses the inherited ones)
 #          (snapshot-as-volume-chain N/A for this plugin; snap resize rejected)
 
-  my $tested_apiver = 15;
+  my $tested_apiver = 16;
 
   # Use () so this compiles under strict even when PVE::Storage is not loaded yet
   # (e.g. perl -c). At runtime PVE loads Storage before calling api().
@@ -251,6 +260,7 @@ my $cmd = {
   #  fuser      => '/usr/bin/fuser',
   multipath  => '/sbin/multipath',
   multipathd => '/sbin/multipathd',
+  scsi_id    => '/lib/udev/scsi_id',
   blockdev   => '/usr/sbin/blockdev',
   dmsetup    => '/sbin/dmsetup',
   kpartx     => '/sbin/kpartx',
@@ -379,7 +389,7 @@ sub multipath_check {
 }
 
 sub wait_for {
-  my ( $success, $message, $timeout, $delay ) = @_;
+  my ( $success, $message, $timeout, $delay, $nonfatal ) = @_;
 
   my $debug = 'Debug :: Waiting for ' . $message;
 
@@ -409,6 +419,8 @@ sub wait_for {
   $logger->( P_VERB,  $debug,                      undef );
   $logger->( P_DEBUG, ": timeout after $time sec", undef );
 
+  # a caller that expects the wait to fail now and then (and handles it) gets false, not an error in the task log
+  return 0 if $nonfatal;
   $fatal->( "Timeout while waiting for $message", undef );
 }
 
@@ -529,6 +541,40 @@ sub purestorage_name {
   return $name;
 }
 
+# Runs a command that is expected to fail now and then and logs nothing: true when it succeeded. (exec_command with a
+# negative $dm is the other way round, it is true when the command failed.)
+sub exec_quiet {
+  my ( $command ) = @_;
+
+  my @command = @$command;
+  eval        { $command[0] = get_command_path( $command[0] ) } if exists $cmd->{ $command[0] };
+  return eval { run_command( \@command, quiet => 1 ); 1 } ? 1 : 0;
+}
+
+# `multipathd <subcommand> map <wwid>` retried until it is accepted or the timeout is over, quietly: a refusal is logged by
+# the error that ends the wait, not per attempt.
+sub multipathd_map_retry {
+  my ( $subcommand, $wwid, $message, $timeout ) = @_;
+
+  wait_for( sub { exec_quiet( [ 'multipathd', $subcommand, 'map', $wwid ] ) }, "multipath map \"$wwid\" $message", $timeout // 30 );
+}
+
+# Right after the volume was activated (`qm resize` of a stopped VM) multipathd may not have the map yet:
+# its refusal is retried until the timeout.
+sub multipath_resize_map {
+  my ( $wwid, $timeout ) = @_;
+
+  multipathd_map_retry( 'resize', $wwid, 'to accept the resize', $timeout );
+}
+
+# The removal is refused while something holds the map (a reader of the device, a partition map of the volume):
+# the refusal is retried until the timeout, an error after it leaves the volume as it was.
+sub multipath_remove_map {
+  my ( $wwid, $timeout ) = @_;
+
+  multipathd_map_retry( 'remove', $wwid, 'to be released', $timeout );
+}
+
 sub get_device_path_wwn {
   my ( $serial ) = @_;
 
@@ -544,7 +590,7 @@ sub get_device_size {
   my ( $device ) = @_;
   $logger->( P_DEBUG, "get_device_size($device)", undef );
 
-  my $path = '/sys/block/' . basename( $device ) . '/size';
+  my $path = "$SYSFS_BLOCK/" . basename( $device ) . '/size';
   my $size = file_read_firstline( $path ) << 9;
 
   $logger->( P_DEBUG, "Device \"$device\" size is $size bytes", undef );
@@ -554,9 +600,16 @@ sub get_device_size {
 sub device_op {
   my ( $device_path, $op, $value ) = @_;
 
-  open( my $fh, '>', $device_path . '/' . $op ) or $fatal->( "Could not open file \"$device_path/$op\" for writing.", undef );
-  print $fh $value;
+  my $file = $device_path . '/' . $op;
+
+  sysopen( my $fh, $file, O_WRONLY ) or $fatal->( "Could not open file \"$file\" for writing.", undef );
+
+  # unbuffered, so that a refusal of the kernel is seen here and not lost on close; the state file refuses
+  # "offline" without the trailing newline
+  my $written = syswrite( $fh, "$value\n" );
+  my $error   = $!;
   close( $fh );
+  $logger->( P_WARN, "Kernel refused '$value' for \"$file\": $error", undef ) unless defined $written;
 }
 
 sub block_device_action {
@@ -569,11 +622,19 @@ sub block_device_action {
       next;
     }
     $device = $1;    # untaint
-    my $device_path = '/sys/block/' . $device . '/device';
-    if ( $action eq 'remove' ) {
-      $logger->( P_DEBUG, "Removing device: $device", undef );
-      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ] );
-      device_op( $device_path, 'state',  'offline' );
+    my $device_path = $SYSFS_BLOCK . '/' . $device . '/device';
+
+    # a path that is already gone needs nothing, and must not stop the cleanup of the paths after it
+    if ( !-e $device_path ) {
+      $logger->( P_DEBUG, "Device $device is already gone, skipping $action", undef );
+      next;
+    }
+    if ( $action eq 'offline' ) {
+      $logger->( P_DEBUG, "Taking device offline: $device", undef );
+      exec_command( [ 'blockdev', '--flushbufs', '/dev/' . $device ], 0 );
+      device_op( $device_path, 'state', 'offline' );
+    } elsif ( $action eq 'delete' ) {
+      $logger->( P_DEBUG, "Deleting device: $device", undef );
       device_op( $device_path, 'delete', '1' );
     } elsif ( $action eq 'rescan' ) {
       $logger->( P_DEBUG, "Rescanning: $device", undef );
@@ -582,6 +643,93 @@ sub block_device_action {
       $fatal->( "Unsupported action in block_device_action() => $action", undef );
     }
   }
+}
+
+# The WWID in the format sysfs shows ("naa." and 32 hex digits) and in the format of multipath ("3" and the same digits).
+sub sysfs_wwid {
+  my ( $wwid ) = @_;
+
+  return 'naa.' . substr( lc( $wwid ), -32 );
+}
+
+sub multipath_wwid {
+  my ( $sysfs_wwid ) = @_;
+
+  return '3' . substr( lc( $sysfs_wwid ), 4 );
+}
+
+# The WWID sysfs has cached for every SCSI disk (disk name => WWID), the one the kernel read when it created the disk.
+# With a LUN only the disks on it are read.
+sub cached_wwids {
+  my ( $lun ) = @_;
+
+  my %wwids;
+  foreach my $file ( glob( "$SYSFS_BLOCK/sd*/device/wwid" ) ) {
+    my $disk = basename( dirname( dirname( $file ) ) );
+    next if defined( $lun ) && ( scsi_device_lun( $disk ) // '' ) ne $lun;
+    my $wwid = file_read_firstline( $file ) // next;
+    $wwids{ $disk } = lc( $wwid );
+  }
+  return %wwids;
+}
+
+# Every path (SCSI disk) of a volume, found by its WWID. The by-id link can point at a single path while the
+# multipath map is not up, so it is not enough to find all of them.
+sub block_device_paths_by_wwid {
+  my ( $wwid ) = @_;
+
+  my %wwids = cached_wwids();
+  return grep { $wwids{ $_ } eq sysfs_wwid( $wwid ) } keys %wwids;
+}
+
+# Every path of a volume: the slaves found through the by-id link and the paths found by the WWID, each listed once.
+sub lun_paths {
+  my ( $wwid, @slaves ) = @_;
+
+  return sort( uniq( @slaves, block_device_paths_by_wwid( $wwid ) ) );
+}
+
+# What a device answers to INQUIRY now, in the format of the multipath WWID (the sysfs wwid is cached when the device
+# is created and a host scan does not read it again). Undef when the device does not answer.
+sub scsi_live_wwid {
+  my ( $disk ) = @_;
+
+  my $wwid = '';
+  eval {
+    run_command( [ get_command_path( 'scsi_id' ), '-g', '-u', "/dev/$disk" ], outfunc => sub { $wwid .= $_[0] }, errfunc => sub { }, timeout => 5 );
+  };
+  return $@ || !length( $wwid ) ? undef : lc( $wwid );
+}
+
+sub scsi_device_lun {
+  my ( $disk ) = @_;
+
+  my $link = readlink( "$SYSFS_BLOCK/$disk/device" );
+  return defined( $link ) && basename( $link ) =~ /:(\d+)$/ ? $1 : undef;
+}
+
+# The array gives the LUN number of a removed volume to the next volume. A device of the old volume that is still on
+# that LUN keeps the old WWID in sysfs, so the new volume does not appear there. A Pure device whose live WWID differs
+# from the cached one is rescanned and becomes a path of the new volume. A device that does not answer is left alone:
+# a path that is down is not a proof of a reused LUN. With a LUN only the devices on it are checked.
+sub heal_stale_paths {
+  my ( $wwid, $lun ) = @_;
+
+  my $pure = 'naa.' . substr( $purestorage_wwn_prefix, 1 );
+  my @healed;
+  my %wwids = cached_wwids( $lun );
+  foreach my $disk ( sort keys %wwids ) {
+    my $cached = $wwids{ $disk };
+    next if index( $cached, $pure ) != 0 || $cached eq sysfs_wwid( $wwid );
+
+    my $live = scsi_live_wwid( $disk ) // next;
+    next if $live eq multipath_wwid( $cached );
+
+    $logger->( P_WARN, "Device \"$disk\" still has the WWID $cached of a removed volume, it answers $live: rescanning", undef );
+    block_device_action( 'rescan', $disk );
+    push @healed, $disk;
+  }
+  return @healed;
 }
 
 sub block_device_slaves {
@@ -594,7 +742,7 @@ sub block_device_slaves {
   $logger->( P_DEBUG, "Device path resolved to \"$device_path\".", undef );
 
   my $device_name = basename( $device_path );
-  my $slaves_path = '/sys/block/' . $device_name . '/slaves';
+  my $slaves_path = "$SYSFS_BLOCK/$device_name/slaves";
 
   my @slaves;
   if ( -d $slaves_path ) {
@@ -791,7 +939,7 @@ sub write_token_cache {
   my $temp_path = "$cache_path.tmp.$$";
 
   eval {
-    my $fh = IO::File->new( $temp_path, 'w', 0600 )
+    my $fh = IO::File->new( $temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600 )
       or die "Cannot create temp file $temp_path: $!\n";
     print $fh $json_text . "\n";
     $fh->close();
@@ -1382,7 +1530,9 @@ sub purestorage_volume_connection {
 
   my $message = ( $response->{ errors } ? 'already ' : '' ) . ( $mode ? 'connected to' : 'disconnected from' );
   $logger->( P_INFO, "Volume \"$volname\" is $message host \"$hname\" on all arrays.", $scfg );
-  return 1;
+
+  # true when this call made the change, false when the array had it that way already
+  return $response->{ errors } ? 0 : 1;
 }
 
 sub purestorage_create_volume {
@@ -1542,12 +1692,12 @@ sub purestorage_resize_volume {
 
   my ( $device_path, @slaves ) = block_device_slaves( $path );
 
-  # Iterate through slaves and rescan each device
-  block_device_action( 'rescan', @slaves );
+  # Rescan every path: a path that keeps the old size makes the multipath map refuse the resize
+  block_device_action( 'rescan', lun_paths( $wwid, @slaves ) );
 
   if ( multipath_check( $wwid ) ) {
     $logger->( P_DEBUG, "Device \"$wwid\" is a multipath device. Proceeding with resizing.", $scfg );
-    exec_command( [ 'multipathd', 'resize', 'map', $wwid ] );
+    multipath_resize_map( $wwid );
   }
 
   $logger->( P_DEBUG, "Expected size = $size", $scfg );
@@ -1558,7 +1708,6 @@ sub purestorage_resize_volume {
     return $new_size >= $size;
   };
 
-  # FIXME: With the current implementation we may not need to wait
   wait_for( $updated_size, "volume \"$volname\" size update" );
 
   $logger->( P_DEBUG, "New size detected for volume \"$volname\": $new_size bytes.", $scfg );
@@ -1665,14 +1814,12 @@ sub purestorage_snap_volume_delete {
   my $message = ( $response->{ errors } ? 'already ' : '' ) . 'destroyed';
   $logger->( P_INFO, "Volume \"$volname\" snapshot \"$snap_name\" is $message.", $scfg );
 
-  #FIXME: Pure FA API states that replication_snapshot is query (not body) parameter
   $action = {
     name   => 'eradicate volume snapshot',
     type   => 'volume-snapshots',
     method => 'DELETE',
     ignore => [ 'No such volume or snapshot.', 'Eradication is disabled.' ],
-    params => $params,
-    body   => { replication_snapshot => \1 }
+    params => $params
   };
   $response = purestorage_api_call( $scfg, $action, 0, $storeid );
 
@@ -1708,23 +1855,28 @@ sub purestorage_pgroup_parent_name {
 
   my $snap_name = $snap_row->{ name } // '';
   return undef unless length( $source_name // '' ) && length( $snap_name );
-  my $tail = '.' . $source_name;
-  return undef unless length( $snap_name ) > length( $tail );
-  return undef unless substr( $snap_name, -length( $tail ) ) eq $tail;
 
-  # Volume-only snaps are VOL.SUFFIX — parent would equal nothing useful / empty after strip
-  # of a single-segment suffix. Require at least one '.' in the parent (PGROUP.SUFFIX).
-  my $parent = substr( $snap_name, 0, length( $snap_name ) - length( $tail ) );
-  return undef unless index( $parent, '.' ) >= 0;
-  return $parent;
+  # The name of a member snapshot is PGROUP.SUFFIX.VOLUME. For a volume of a pod the array does not repeat the pod in
+  # front of the volume (POD::PGROUP.SUFFIX.VOLUME), so the volume is tried with and without it.
+  foreach my $volume ( $source_name, $source_name =~ /::(.+)$/ ? $1 : () ) {
+    my $tail = '.' . $volume;
+    next unless length( $snap_name ) > length( $tail );
+    next unless substr( $snap_name, -length( $tail ) ) eq $tail;
+
+    # Volume-only snaps are VOL.SUFFIX — parent would equal nothing useful / empty after strip
+    # of a single-segment suffix. Require at least one '.' in the parent (PGROUP.SUFFIX).
+    my $parent = substr( $snap_name, 0, length( $snap_name ) - length( $tail ) );
+    return $parent if index( $parent, '.' ) >= 0;
+  }
+  return undef;
 }
 
-# PVE snapshot names disallow '.'; sanitize parent PGROUP.SUFFIX → PGROUP-SUFFIX.
+# PVE snapshot names disallow '.' and ':' (the pod of a group is named POD::PGROUP): sanitize parent PGROUP.SUFFIX → PGROUP-SUFFIX.
 sub purestorage_pve_snapname_from_parent {
   my ( $parent ) = @_;
   return undef unless length( $parent // '' );
   my $name = $parent;
-  $name =~ s/\./-/g;
+  $name =~ s/[.:]/-/g;
   return $name;
 }
 
@@ -1734,12 +1886,15 @@ sub purestorage_pg_description_parent {
   return $1;
 }
 
-# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }.
+# Parse "PG: parent; vol: member; ..." into { full_vol => member_snap, ... }. A name of a pod carries "::" (no space after
+# the colon), the separator of a pair is ": ".
 sub purestorage_pg_description_members {
   my ( $description ) = @_;
   my %members;
   return \%members unless defined $description && $description =~ /^PG:/;
-  while ( $description =~ /;\s*([^:;]+):\s*([^;]+)/g ) {
+  my ( undef, @pairs ) = split( /;\s*/, $description );
+  foreach my $pair ( @pairs ) {
+    next unless $pair =~ /^(.+?):\s+(.+)$/;
     my ( $vol, $snap ) = ( $1, $2 );
     $vol  =~ s/^\s+|\s+$//g;
     $snap =~ s/^\s+|\s+$//g;
@@ -1748,9 +1903,11 @@ sub purestorage_pg_description_members {
   return \%members;
 }
 
-# Build a PVE snapshot config entry without clobbering description/parent.
+# Build a PVE snapshot config entry without clobbering description/parent. A drive of $storeid that is not among the
+# volumes of the snapshot ($snap_volnames, unknown: every drive stays) was added after it and stays out: a rollback has no
+# member to restore it from.
 sub purestorage_snapshot_entry_from_conf {
-  my ( $conf, $snaptime, $description ) = @_;
+  my ( $conf, $snaptime, $description, $storeid, $snap_volnames ) = @_;
   my $entry = {
     snaptime    => $snaptime,
     description => $description,
@@ -1759,6 +1916,7 @@ sub purestorage_snapshot_entry_from_conf {
   for my $k ( keys %$conf ) {
     next if $skip{ $k };
     next if ref( $conf->{ $k } );
+    next if defined( $storeid ) && $snap_volnames && $conf->{ $k } =~ /^\Q$storeid\E:([^,]+)/ && !$snap_volnames->{ $1 };
     $entry->{ $k } = $conf->{ $k };
   }
   return $entry;
@@ -1803,34 +1961,6 @@ sub purestorage_resolve_imported_snap {
     }
   }
 
-  $parent //= do {
-
-    # Fall back: find a pgroup parent whose sanitized name matches the PVE key
-    my $pg_resp = eval {
-      purestorage_api_list(
-        $scfg,
-        {
-          name   => 'list protection group snapshots',
-          type   => 'protection-group-snapshots',
-          method => 'GET',
-          params => { destroyed => 'false' }
-        },
-        $storeid
-      );
-    };
-    my $found;
-    if ( $pg_resp && ref( $pg_resp->{ items } ) eq 'ARRAY' ) {
-      for my $pg ( @{ $pg_resp->{ items } } ) {
-        my $pname = $pg->{ name } // '';
-        next unless length( $pname );
-        if ( ( purestorage_pve_snapname_from_parent( $pname ) // '' ) eq $pve_snap ) {
-          $found = $pname;
-          last;
-        }
-      }
-    }
-    $found;
-  };
   return undef unless length( $parent // '' );
 
   my $expected = $parent . '.' . $full_vol;
@@ -1859,16 +1989,45 @@ sub purestorage_resolve_imported_snap {
   return undef;
 }
 
+# The exact array name of an imported protection-group snapshot, undef for a snapshot taken through Proxmox (its name
+# follows from the Proxmox one). An imported snapshot that is not on the array is an error.
+sub purestorage_exact_snap_name {
+  my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
+
+  return undef unless length( $snap // '' ) && $class->purestorage_snap_is_pg_imported( $volname, $snap );
+
+  my $exact = $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap );
+  $fatal->( "Pure protection-group snapshot \"$snap\" not found for volume \"$volname\"", $scfg ) unless length( $exact // '' );
+  return $exact;
+}
+
+# status() forks the protection-group sync and does not wait for it; pvestatd lives for days, so every finished run would
+# stay a zombie. The runs started by this process are remembered and reaped (without waiting) on the next call. Only
+# these: the other children of the daemon are waited for by its own code.
+my @sync_children;
+
+sub purestorage_track_sync_child {
+  my ( $pid ) = @_;
+
+  push @sync_children, $pid;
+}
+
+sub purestorage_reap_sync_children {
+  @sync_children = grep { waitpid( $_, WNOHANG ) == 0 } @sync_children;
+}
+
 # Schedule pgroup sync outside status(): non-blocking lock + fork so pvestatd is not stalled.
 sub purestorage_maybe_schedule_pgroup_sync {
   my ( $scfg, $storeid ) = @_;
+  purestorage_reap_sync_children();
   return unless $scfg->{ pgroup_sync };
 
   my $interval = $scfg->{ pgroup_sync_interval } // 60;
   $interval = 30 if $interval < 30;
 
-  my $ts_file   = "/var/run/pve-pure-sync-${storeid}.ts";
-  my $lock_file = "/var/run/pve-pure-sync-${storeid}.lock";
+  my $ts_file   = "$STATUS_MARKER_DIR/sync-${storeid}.ts";
+  my $lock_file = "$STATUS_MARKER_DIR/sync-${storeid}.lock";
+  eval { File::Path::make_path( $STATUS_MARKER_DIR, { mode => 0700 } ) };
 
   open( my $lf, '>>', $lock_file ) or return;
   flock( $lf, LOCK_EX | LOCK_NB )  or do { close $lf; return; };
@@ -1910,11 +2069,193 @@ sub purestorage_maybe_schedule_pgroup_sync {
     _exit( 0 );
   }
 
+  purestorage_track_sync_child( $pid );
   close $lf;    # child's inherited FD still holds the exclusive lock
   return;
 }
 
+# "YYYYMMDD-HHMMSS" (UTC) of a snapshot time: the part of a Proxmox snapshot name that tells two snapshots with the same
+# name apart. UTC, so that every node of a cluster makes the same name.
+sub purestorage_snapshot_time_suffix {
+  my ( $snaptime ) = @_;
+
+  return strftime( '%Y%m%d-%H%M%S', gmtime( $snaptime ) );
+}
+
+# Longest snapshot name Proxmox accepts in an API call (clone, rollback, delete): the pve-snapshot-name type.
+our $PVE_SNAPNAME_MAX = 40;
+
+# $base cut so that $base . $tail is not longer than $PVE_SNAPNAME_MAX.
+sub purestorage_fit_snapname {
+  my ( $base, $tail ) = @_;
+
+  $tail //= '';
+  my $name = substr( $base, 0, $PVE_SNAPNAME_MAX - length( $tail ) );
+  $name =~ s/-+$// if length( $tail );    # the tail brings its own dash
+  return $name . $tail;
+}
+
+# Groups that give the same Proxmox name (a-b.c and a.b-c both give a-b-c) would overwrite one entry each cycle. A name that
+# an imported entry holds ($held: name => parent of the group in its description) stays with that group, so that a group
+# that sorts earlier and shows up later does not take it over. The other groups are taken in the order of their parents,
+# the first keeps the name and every later one gets the date and time of its snapshot in the name (and a number when even
+# that is taken). A name is never longer than Proxmox accepts: the part before the date is cut, the date stays.
+sub purestorage_unique_group_names {
+  my ( $groups, $held ) = @_;
+
+  my %taken;
+  my @unclaimed;
+  foreach my $group ( @$groups ) {
+    my $name = purestorage_fit_snapname( $group->{ pve_name } );
+    if ( ( $held->{ $name } // '' ) eq $group->{ parent } ) {
+      $group->{ pve_name } = $name;
+      $taken{ $name } = 1;
+    } else {
+      push @unclaimed, $group;
+    }
+  }
+
+  foreach my $group ( sort { $a->{ parent } cmp $b->{ parent } } @unclaimed ) {
+    my $name = purestorage_fit_snapname( $group->{ pve_name } );
+    if ( $taken{ $name } ) {
+      my $dated = '-' . purestorage_snapshot_time_suffix( $group->{ snaptime } );
+      my $n     = 1;
+      my $try;
+      do { $try = purestorage_fit_snapname( $name, $n > 1 ? "$dated-$n" : $dated ); ++$n } while ( $taken{ $try } );
+      $name = $try;
+    }
+    $group->{ pve_name } = $name;
+    $taken{ $name } = 1;
+  }
+  return $groups;
+}
+
+# Imports one protection-group snapshot into the snapshots of a VM config, returns 1 when the config changed. A snapshot
+# is ours only when its description names a protection group: a snapshot of the user with the same name, with an empty
+# description too, stays as it is and the group is imported under a name with the snapshot time.
+sub purestorage_import_group {
+  my ( $conf, $group, $keep, $storeid ) = @_;
+
+  my $psnaps     = $conf->{ snapshots } //= {};
+  my $pve_name   = $group->{ pve_name };
+  my $want_desc  = $group->{ description } // '';
+  my $final_name = $pve_name;
+
+  if ( exists $psnaps->{ $pve_name } ) {
+    my $cur = $psnaps->{ $pve_name }{ description };
+    $cur = defined $cur ? "$cur" : '';
+    if ( defined( purestorage_pg_description_parent( $cur ) ) ) {
+      my $changed = 0;
+      if ( length $want_desc && $cur ne $want_desc ) {
+        $psnaps->{ $pve_name }{ description } = $want_desc;
+        $changed = 1;
+      }
+      my $old_st = $psnaps->{ $pve_name }{ snaptime };
+      $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
+      if ( $old_st <= 0 && $group->{ snaptime } > 0 ) {
+        $psnaps->{ $pve_name }{ snaptime } = $group->{ snaptime };
+        $changed = 1;
+      }
+      return $changed;
+    }
+
+    # Name taken by a snapshot that is not imported: unique fallback. Registered as kept before the early return,
+    # so later cycles do not prune and recreate it.
+    $final_name = purestorage_fit_snapname( $pve_name, '-' . purestorage_snapshot_time_suffix( $group->{ snaptime } ) );
+    $keep->{ $final_name } = 1;
+    return 0 if exists $psnaps->{ $final_name };
+  }
+
+  $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $group->{ snaptime }, $want_desc, $storeid, $group->{ volnames } );
+  return 1;
+}
+
+# Removes a snapshot from a VM config the way Proxmox does it: whatever had it as its parent gets the parent of the removed
+# snapshot (or none), so that no parent points at a snapshot that is gone.
+sub purestorage_remove_snapshot_entry {
+  my ( $conf, $name ) = @_;
+
+  my $snapshots = $conf->{ snapshots };
+  my $parent    = $snapshots->{ $name }{ parent };
+  delete $snapshots->{ $name };
+  foreach my $entry ( $conf, values %$snapshots ) {
+    next unless ( $entry->{ parent } // '' ) eq $name;
+    if ( $parent ) {
+      $entry->{ parent } = $parent;
+    } else {
+      delete $entry->{ parent };
+    }
+  }
+}
+
 # Import protection-group snapshots into QEMU VM configs (Nimble-style sync).
+# The protection-group snapshots of one VM as groups for purestorage_import_group. $parents is parent => { volume => member
+# snapshot name }; a group with no member is left out.
+sub purestorage_vmid_groups {
+  my ( $parents, $pg_created, $pref_len, $fetch_incomplete ) = @_;
+
+  my @groups;
+  for my $parent ( sort keys %$parents ) {
+    my $members = $parents->{ $parent };
+
+    # Historical completeness: accept any non-empty member set from the snapshot itself. Do not require every *current*
+    # VM volume (e.g. a cloudinit disk added later) to be present in past pgroup snaps.
+    next unless $members && keys %$members;
+
+    my $pve_name = purestorage_pve_snapname_from_parent( $parent );
+    next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+    my $created_ms = $pg_created->{ $parent };
+    my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
+
+    my @parts = ( "PG: $parent" );
+    push @parts, map { "$_: $members->{$_}" } sort keys %$members;
+    push @groups, {
+      pve_name    => $pve_name,
+      parent      => $parent,
+      snaptime    => $snaptime,
+      description => join( '; ', @parts ),
+
+      # unknown when the fetch was incomplete: a missing member may only be a missing row
+      volnames => $fetch_incomplete ? undef : { map { ( $pref_len ? substr( $_, $pref_len ) : $_ ) => 1 } keys %$members },
+    };
+  }
+  return \@groups;
+}
+
+# True when an imported snapshot entry belongs to VM $vmid on this storage: its description names a volume of the VM, one
+# that exists now or one that was removed since the import.
+sub purestorage_group_entry_is_ours {
+  my ( $description, $vmid, $vol_map, $pref ) = @_;
+
+  my $pref_len = length( $pref );
+  for my $fvn ( keys %{ purestorage_pg_description_members( $description ) } ) {
+    return 1 if exists $vol_map->{ $fvn } && $vol_map->{ $fvn }{ vmid } eq $vmid;
+    my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
+    return 1 if $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/;
+  }
+  return 0;
+}
+
+# Removes the imported entries of VM $vmid whose group snapshot is gone from the array ($keep holds the names that are still
+# there). Returns 1 when the config changed.
+sub purestorage_prune_vanished_groups {
+  my ( $conf, $vmid, $keep, $vol_map, $pref ) = @_;
+
+  my $changed = 0;
+  my $psnaps  = $conf->{ snapshots };
+  for my $sname ( keys %$psnaps ) {
+    next if $keep->{ $sname };
+    my $desc = $psnaps->{ $sname }{ description };
+    $desc = defined $desc ? "$desc" : '';
+    next unless defined( purestorage_pg_description_parent( $desc ) );
+    next unless purestorage_group_entry_is_ours( $desc, $vmid, $vol_map, $pref );
+    purestorage_remove_snapshot_entry( $conf, $sname );
+    $changed = 1;
+  }
+  return $changed;
+}
+
 sub purestorage_sync_array_snapshots {
   my ( $scfg, $storeid ) = @_;
 
@@ -1964,8 +2305,7 @@ sub purestorage_sync_array_snapshots {
   for my $name ( keys %vol_map ) {
     my $vmid = $vol_map{ $name }{ vmid };
     next if exists $vmid_is_qemu{ $vmid };
-    my $conf = eval { PVE::QemuConfig->load_config( $vmid ) };
-    $vmid_is_qemu{ $vmid } = ( !$@ && ref( $conf ) eq 'HASH' ) ? 1 : 0;
+    $vmid_is_qemu{ $vmid } = -f PVE::QemuConfig->config_file( $vmid ) ? 1 : 0;
   }
   for my $name ( keys %vol_map ) {
     delete $vol_map{ $name } unless $vmid_is_qemu{ $vol_map{ $name }{ vmid } };
@@ -2045,106 +2385,30 @@ sub purestorage_sync_array_snapshots {
   my %vmids_to_touch = map { $vol_map{ $_ }{ vmid } => 1 } keys %vol_map;
 
   for my $vmid ( sort { $a <=> $b } keys %vmids_to_touch ) {
-    my @groups;
-
-    for my $parent ( sort keys %{ $by_vmid{ $vmid } // {} } ) {
-      my $members = $by_vmid{ $vmid }{ $parent };
-
-      # Historical completeness: accept any non-empty member set from the
-      # snapshot itself. Do not require every *current* VM volume (e.g. a
-      # cloudinit disk added later) to be present in past pgroup snaps.
-      next unless $members && keys %$members;
-
-      my $pve_name = purestorage_pve_snapname_from_parent( $parent );
-      next unless length( $pve_name // '' ) && $pve_name =~ /^[a-zA-Z][a-zA-Z0-9_-]*$/;
-
-      my $created_ms = $pg_created{ $parent };
-      my $snaptime   = ( defined $created_ms && $created_ms > 0 ) ? int( $created_ms / 1000 ) : time();
-
-      my @parts = ( "PG: $parent" );
-      for my $fvn ( sort keys %$members ) {
-        push @parts, "$fvn: $members->{$fvn}";
-      }
-      push @groups,
-        {
-          pve_name    => $pve_name,
-          parent      => $parent,
-          snaptime    => $snaptime,
-          description => join( '; ', @parts ),
-        };
-    }
-
-    my %keep = map { $_->{ pve_name } => 1 } @groups;
+    my $groups = purestorage_vmid_groups( $by_vmid{ $vmid } // {}, \%pg_created, $pref_len, $fetch_incomplete );
 
     eval {
       PVE::QemuConfig->lock_config(
         $vmid,
         sub {
-          my $conf    = PVE::QemuConfig->load_config( $vmid );
-          my $psnaps  = $conf->{ snapshots } //= {};
+          my $conf = PVE::QemuConfig->load_config( $vmid );
+          $conf->{ snapshots } //= {};
           my $changed = 0;
 
-          for my $g ( @groups ) {
-            my $pve_name   = $g->{ pve_name };
-            my $want_desc  = $g->{ description } // '';
-            my $final_name = $pve_name;
+          # the names are taken after the config is read: an entry that holds a name decides who keeps it
+          my %held;
+          foreach my $name ( keys %{ $conf->{ snapshots } } ) {
+            my $parent = purestorage_pg_description_parent( $conf->{ snapshots }{ $name }{ description } );
+            $held{ $name } = $parent if defined $parent;
+          }
+          purestorage_unique_group_names( $groups, \%held );
+          my %keep = map { $_->{ pve_name } => 1 } @$groups;
 
-            if ( exists $psnaps->{ $pve_name } ) {
-              my $cur = $psnaps->{ $pve_name }{ description };
-              $cur = defined $cur ? "$cur" : '';
-              my $ours = defined( purestorage_pg_description_parent( $cur ) ) || $cur eq '';
-              if ( $ours ) {
-                if ( length $want_desc && $cur ne $want_desc ) {
-                  $psnaps->{ $pve_name }{ description } = $want_desc;
-                  $changed = 1;
-                }
-                my $old_st = $psnaps->{ $pve_name }{ snaptime };
-                $old_st = defined $old_st ? int( 0 + $old_st ) : 0;
-                if ( $old_st <= 0 && $g->{ snaptime } > 0 ) {
-                  $psnaps->{ $pve_name }{ snaptime } = $g->{ snaptime };
-                  $changed = 1;
-                }
-                next;
-              }
-
-              # Name taken by a non-imported snap — unique fallback.
-              # Register keep before next so later cycles do not prune/recreate.
-              $final_name = $pve_name . '-' . $g->{ snaptime };
-              $keep{ $final_name } = 1;
-              next if exists $psnaps->{ $final_name };
-            }
-
-            $psnaps->{ $final_name } = purestorage_snapshot_entry_from_conf( $conf, $g->{ snaptime }, $want_desc );
-            $changed = 1;
+          foreach my $group ( @$groups ) {
+            $changed = 1 if purestorage_import_group( $conf, $group, \%keep, $storeid );
           }
 
-          if ( !$fetch_incomplete ) {
-            for my $sname ( keys %$psnaps ) {
-              next if $keep{ $sname };
-              my $desc = $psnaps->{ $sname }{ description };
-              $desc = defined $desc ? "$desc" : '';
-              next unless defined( purestorage_pg_description_parent( $desc ) );
-
-              # Ours if the stored member list names any volume for this vmid
-              # on this storage (current or removed since import).
-              my $members = purestorage_pg_description_members( $desc );
-              my $ours    = 0;
-              for my $fvn ( keys %$members ) {
-                if ( exists $vol_map{ $fvn } && $vol_map{ $fvn }{ vmid } eq $vmid ) {
-                  $ours = 1;
-                  last;
-                }
-                my $volname = ( $pref_len && index( $fvn, $pref ) == 0 ) ? substr( $fvn, $pref_len ) : $fvn;
-                if ( $volname =~ /^vm-\Q$vmid\E-(disk-|cloudinit)/ ) {
-                  $ours = 1;
-                  last;
-                }
-              }
-              next unless $ours;
-              delete $psnaps->{ $sname };
-              $changed = 1;
-            }
-          }
+          $changed = 1 if !$fetch_incomplete && purestorage_prune_vanished_groups( $conf, $vmid, \%keep, \%vol_map, $pref );
 
           if ( $changed ) {
             PVE::QemuConfig->write_config( $vmid, $conf );
@@ -2206,7 +2470,7 @@ sub clone_image {
 
   my $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
 
-  $class->purestorage_volume_restore( $scfg, $storeid, $name, $volname, $snap );
+  $class->purestorage_volume_restore( $scfg, $storeid, $name, $volname, $snap, undef, $class->purestorage_exact_snap_name( $scfg, $storeid, $volname, $snap ) );
 
   return $name;
 }
@@ -2231,6 +2495,9 @@ sub alloc_image {
   # Validate the name format, should start with 'vm-$vmid-disk'
   if ( defined( $name ) ) {
     $fatal->( "Illegal name \"$name\" - should be \"vm-$vmid-(disk-*|cloudinit|state-*)\"", $scfg ) if $name !~ m/^vm-$vmid-(disk-|cloudinit|state-)/;
+
+    # the content API of PVE appends the format as a suffix, the array accepts letters, digits, '_' and '-' only
+    $name =~ s/\.\Q$fmt\E$//;
   } else {
     $name = $class->find_free_diskname( $storeid, $scfg, $vmid );
   }
@@ -2270,9 +2537,52 @@ sub list_images {
   return $class->purestorage_list_volumes( $scfg, $vmid, $storeid, 0 );
 }
 
+# PVE asks every storage for its status one after another, without a timeout, so an array that does not answer holds
+# each round for the HTTP timeout. A failure leaves a marker in a directory of this node (the way to the array is a
+# property of the node, and /run goes with a reboot); until the backoff is over the storage is inactive without a call.
+sub status_marker_path {
+  my ( $storeid ) = @_;
+
+  return "$STATUS_MARKER_DIR/$storeid.failed";
+}
+
+sub status_recently_failed {
+  my ( $storeid ) = @_;
+
+  my $changed = ( stat( status_marker_path( $storeid ) ) )[9];
+  return defined( $changed ) && time() - $changed < $STATUS_BACKOFF;
+}
+
+sub status_mark_failed {
+  my ( $storeid ) = @_;
+
+  eval {
+    File::Path::make_path( $STATUS_MARKER_DIR, { mode => 0700 } );
+    my $path = status_marker_path( $storeid );
+    open( my $fh, '>', $path ) or die "Cannot write $path: $!\n";
+    close( $fh );
+  };
+  $logger->( P_WARN, "Cannot mark storage \"$storeid\" as failed: $@", undef ) if $@;
+}
+
 sub status {
   my ( $class, $storeid, $scfg, $cache ) = @_;
   $logger->( P_DEBUG, "status", $scfg );
+
+  return ( 0, 0, 0, 0 ) if status_recently_failed( $storeid );
+
+  my @status = eval { $class->purestorage_array_status( $storeid, $scfg ) };
+  if ( $@ ) {
+    my $error = $@;
+    status_mark_failed( $storeid );
+    die $error;
+  }
+  unlink( status_marker_path( $storeid ) );
+  return @status;
+}
+
+sub purestorage_array_status {
+  my ( $class, $storeid, $scfg ) = @_;
 
   my $total;
   my $used;
@@ -2377,12 +2687,36 @@ sub volume_size_info {
 
   my $volume = $class->purestorage_get_existing_volume_info( $scfg, $volname );
 
-  #TODO: Consider moving this inside of purestorage_get_existing_volume_info()
   $fatal->( "PureStorage API :: No volume data found for \"$volname\"", $scfg ) unless $volume;
 
   $logger->( P_DEBUG, "Provisioned: " . $volume->{ size } . ", Used: " . $volume->{ used }, $scfg );
 
   return wantarray ? ( $volume->{ size }, 'raw', $volume->{ used }, undef ) : $volume->{ size };
+}
+
+# The LUN of a volume that is mapped: of the disk its by-id link leads to, or of the first path of its multipath map.
+sub volume_lun {
+  my ( $path ) = @_;
+
+  my $device = abs_path( $path ) // return undef;
+  $device = basename( $device );
+  ( $device ) = map { basename( $_ ) } glob( "$SYSFS_BLOCK/$device/slaves/*" ) if $device =~ /^dm-/;
+  return defined( $device ) ? scsi_device_lun( $device ) : undef;
+}
+
+# A device of a removed volume on the same LUN hides the new volume: when the path does not show up soon, every Pure
+# device is checked, and when it does, the devices on its LUN are.
+sub wait_for_volume_path {
+  my ( $wwid, $path, $volname ) = @_;
+
+  my $path_exists = sub { return -e $path };
+  if ( wait_for( $path_exists, "volume \"$volname\" to map", $STALE_PATH_WAIT, undef, 1 ) ) {
+    my $lun = volume_lun( $path );
+    heal_stale_paths( $wwid, $lun ) if defined $lun;
+  } else {
+    heal_stale_paths( $wwid );
+    wait_for( $path_exists, "volume \"$volname\" to map", 30 );
+  }
 }
 
 sub map_volume {
@@ -2401,12 +2735,7 @@ sub map_volume {
     $fatal->( "Protocol: \"$protocol\" isn't a valid protocol", $scfg );
   }
 
-  my $path_exists = sub {
-    return -e $path;
-  };
-
-  # Wait for the device to appear
-  wait_for( $path_exists, "volume \"$volname\" to map", 30 );
+  wait_for_volume_path( $wwid, $path, $volname );
 
   # we might end up with operational disk but without multipathing, e.g.
   # if unmapping was interrupted ('remove map' was already done, but slaves were not removed)
@@ -2423,19 +2752,47 @@ sub map_volume {
   return $path;
 }
 
+# PVE::Storage::unmap_volume calls this with a snapshot name as the fourth argument: the signature stays.
 sub unmap_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname ) = @_;
   $logger->( P_DEBUG, "unmap_volume", $scfg );
 
-  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
-  return 0 unless $path ne '' && -b $path;
+  return $class->purestorage_unmap_volume( $storeid, $scfg, $volname );
+}
 
-  my ( $device_path, @slaves ) = block_device_slaves( $path );
+# True when the device $disk in sysfs is still a path of the volume with $wwid. The kernel hands the name of a deleted path
+# to the next volume at once, and that one is not ours; a device that does not tell its WWID counts as ours.
+sub path_is_still_of {
+  my ( $disk, $wwid ) = @_;
+
+  return 0 unless -e "$SYSFS_BLOCK/$disk";
+  my $cached = file_read_firstline( "$SYSFS_BLOCK/$disk/device/wwid" );
+  return !defined( $cached ) || lc( $cached ) eq sysfs_wwid( $wwid );
+}
+
+# Removes the local paths of a volume. iscsid rescans the sessions regularly and brings a removed path back
+# while the volume is still connected on the array, and such a path fails once the array disconnects the volume.
+# So every path goes offline first, $after_offline runs (the array disconnect), and only then the paths are
+# deleted.
+sub purestorage_unmap_volume {
+  my ( $class, $storeid, $scfg, $volname, $after_offline ) = @_;
+  $logger->( P_DEBUG, "purestorage_unmap_volume", $scfg );
+
+  my ( $path, $wwid ) = $class->purestorage_get_wwn( $scfg, $volname );
+  my $linked = $path ne '' && -b $path;
+  my ( $device_path, @slaves ) = $linked ? block_device_slaves( $path ) : ( undef );
+
+  # The by-id link may point at a single path when the multipath map is not up: remove every path of the volume
+  my @remove = lun_paths( $wwid, $linked ? @slaves : () );
+  unless ( $linked || @remove ) {
+    $after_offline->() if $after_offline;
+    return 0;
+  }
 
   # Ensure all data is flushed to disk for write-back cache environments
-  $logger->( P_VERB, "Flushing filesystem and device buffers for $device_path", $scfg );
+  $logger->( P_VERB, "Flushing filesystem and device buffers for " . ( $device_path // $wwid ), $scfg );
   exec_command( ['sync'] );
-  exec_command( [ 'blockdev', '--flushbufs', $device_path ] );
+  exec_command( [ 'blockdev', '--flushbufs', $device_path ] ) if defined $device_path;
 
   # Wait for udev events to settle, ensuring all async operations complete
   eval { exec_command( [ 'udevadm', 'settle', '--timeout=10' ] ) };
@@ -2447,13 +2804,34 @@ sub unmap_volume {
     $logger->( P_DEBUG, "Device \"$wwid\" is a multipath device. Proceeding with multipath removal.", $scfg );
 
     # remove the link
-    exec_command( [ 'multipathd', 'remove', 'map', $wwid ] );
+    multipath_remove_map( $wwid );
   } else {
     $logger->( P_DEBUG, "Device \"$wwid\" is not a multipath device. Skipping multipath removal.", $scfg );
   }
 
-  # Iterate through slaves and remove each device
-  block_device_action( 'remove', @slaves );
+  block_device_action( 'offline', @remove );
+
+  # paths left offline are worse than the race, so they are deleted even when $after_offline fails
+  my $after_ok    = !$after_offline || eval { $after_offline->(); 1 };
+  my $after_error = $@;
+  block_device_action( 'delete', @remove );
+
+  # a path that stays in sysfs is a stale device that fails as soon as the volume is gone from the array
+  my @left;
+  my $gone = wait_for(
+    sub {
+      @left = grep { path_is_still_of( $_, $wwid ) } @remove;
+      return !@left;
+    },
+    "paths of volume \"$volname\" to disappear: " . join( ' ', @remove ),
+    $PATH_REMOVAL_TIMEOUT,
+    undef,
+    1
+  );
+  my $left_error = !$gone ? "paths of volume \"$volname\" are still present after the removal: " . join( ' ', @left ) . "\n" : '';
+
+  die $after_error unless $after_ok;
+  die $left_error if $left_error;
 
   $logger->( P_DEBUG, "Device \"$wwid\" is removed.", $scfg );
   return 1;
@@ -2463,9 +2841,21 @@ sub activate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache, $hints ) = @_;
   $logger->( P_DEBUG, "activate_volume", $scfg );
 
-  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
+  my $connected_now = $class->purestorage_volume_connection( $storeid, $scfg, $volname, 1 );
 
-  $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints );
+  # PVE does not undo a failed activation: deactivate here, so that the connection on the array and the paths of
+  # a half-mapped volume do not stay behind. Only when this call connected the volume: one that was connected before
+  # may be in use (a running guest holds its multipath device), and removing it would take the disk from the guest.
+  unless ( eval { $class->map_volume( $storeid, $scfg, $volname, $snapname, $hints ); 1 } ) {
+    my $error = $@;
+    if ( $connected_now ) {
+      eval { $class->deactivate_volume( $storeid, $scfg, $volname, $snapname, $cache ) };
+      $logger->( P_WARN, "Rollback of the failed activation of volume \"$volname\" failed: $@", $scfg ) if $@;
+    } else {
+      $logger->( P_WARN, "Mapping of volume \"$volname\" failed, the volume was connected before and is left as it was", $scfg );
+    }
+    die $error;
+  }
   return 1;
 }
 
@@ -2473,9 +2863,8 @@ sub deactivate_volume {
   my ( $class, $storeid, $scfg, $volname, $snapname, $cache ) = @_;
   $logger->( P_DEBUG, "deactivate_volume", $scfg );
 
-  $class->unmap_volume( $storeid, $scfg, $volname, $snapname );
-
-  $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 );
+  # the array disconnect is the callback of the removal: it runs between the paths going offline and their deletion
+  $class->purestorage_unmap_volume( $storeid, $scfg, $volname, sub { $class->purestorage_volume_connection( $storeid, $scfg, $volname, 0 ) } );
 
   $logger->( P_INFO, "Volume \"$volname\" is deactivated.", $scfg );
 
@@ -2537,14 +2926,7 @@ sub volume_snapshot_rollback {
   my ( $class, $scfg, $storeid, $volname, $snap ) = @_;
   $logger->( P_DEBUG, "volume_snapshot_rollback", $scfg );
 
-  if ( $class->purestorage_snap_is_pg_imported( $volname, $snap ) ) {
-    my $exact = $class->purestorage_resolve_imported_snap( $scfg, $storeid, $volname, $snap );
-    $fatal->( "Pure protection-group snapshot \"$snap\" not found for volume \"$volname\"", $scfg )
-      unless length( $exact // '' );
-    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1, $exact );
-  } else {
-    $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1 );
-  }
+  $class->purestorage_volume_restore( $scfg, $storeid, $volname, $volname, $snap, 1, $class->purestorage_exact_snap_name( $scfg, $storeid, $volname, $snap ) );
 
   return 1;
 }

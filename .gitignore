@@ -1,3 +1,4 @@
+# Debian packaging build output
 debian/.debhelper
 debian/changelog
 debian/debhelper-build-stamp
@@ -5,10 +6,23 @@ debian/libpve-storage-purestorage-perl
 debian/files
 debian/package
 debian/tmp
-tests/test_results.txt
 /*.buildinfo
 /*.deb
-*.log
 *.substvars
 build/
 changelog
+
+# Output of test runs
+tests/test_results.txt
+*.log
+# full output of every test run by tests/e2e/run_suite.py
+tests/e2e/logs/
+
+# Test stand access (nodes, storage id, ssh key path, secrets): never committed, keys are listed in .env.example
+.env
+
+# Local planning notes (specs and plans of the test work), not part of the repository
+docs/superpowers/
+
+# Local Claude Code notes about the test stand: nodes, run order, stand quirks
+CLAUDE.local.md

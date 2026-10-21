@@ -6,18 +6,23 @@ on:
 
 jobs:
   test:
-    name: Run tests
-    runs-on: ubuntu-22.04
+    name: Run tests (Perl ${{ matrix.perl }})
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # the Perl of PVE 8 and of PVE 9
+        perl: ['5.36', '5.40']
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
     - name: Setup Perl
-      uses: shogo82148/actions-setup-perl@v1
+      uses: shogo82148/actions-setup-perl@8b574cdc2dffdae49f803204a4f2b716a2fa1db7 # v1.44.2
       with:
-        perl-version: '5.34'
+        perl-version: ${{ matrix.perl }}
 
     - name: Install cpanm
       run: |
@@ -25,7 +30,7 @@ jobs:
 
     - name: Install Perl dependencies
       run: |
-        cpanm --notest Test::More JSON JSON::XS
+        cpanm --notest Test::More JSON JSON::XS LWP::UserAgent HTTP::Message URI
 
     - name: Run tests
       run: |

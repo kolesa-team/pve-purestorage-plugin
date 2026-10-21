@@ -1,0 +1,3 @@
+[submodule "tests/e2e/proxmox-e2e-tests"]
+	path = tests/e2e/proxmox-e2e-tests
+	url = https://git.proxmox.com/git/proxmox-e2e-tests.git

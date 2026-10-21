@@ -1,0 +1,62 @@
+#![enable(implicit_some)]
+
+TestcaseConfig(
+    testcases: [
+        Testcase(
+            name: "extended_migration_under_load",
+            run: "./tests/migration_under_load.pl",
+            timeout: 1800,
+            instances: [],
+            tag: "storage-plugin-guest",
+            capability: "online migration under write load (data, multipath)",
+        ),
+        Testcase(
+            name: "extended_unmap_busy_map",
+            run: "./tests/unmap_busy_map.pl",
+            timeout: 300,
+            instances: [],
+            tag: "storage-plugin",
+            capability: "deactivation of a volume whose multipath map is in use (waits, never leaves a half removed volume)",
+        ),
+        Testcase(
+            name: "extended_volume_lifecycle_loop",
+            run: "./tests/volume_lifecycle_loop.pl",
+            timeout: 1500,
+            instances: [],
+            tag: "storage-plugin-guest",
+            capability: "volume life in a loop on a LUN the array has just freed, two guest controllers",
+        ),
+        Testcase(
+            name: "extended_hard_stop_integrity",
+            run: "./tests/hard_stop_integrity.pl",
+            timeout: 600,
+            instances: [],
+            tag: "storage-plugin-guest",
+            capability: "data a guest was told is written survives a hard stop (qm stop) with cache=writeback on the data disk",
+        ),
+        Testcase(
+            name: "extended_activate_failure_keeps_volume",
+            run: "./tests/activate_failure_keeps_volume.pl",
+            timeout: 600,
+            instances: [],
+            tag: "storage-plugin-guest",
+            capability: "a failed mapping rolls back only what the activation did: a volume of a running guest keeps its paths and the guest keeps running",
+        ),
+        Testcase(
+            name: "extended_stale_lun_heal",
+            run: "./tests/stale_lun_heal.pl",
+            timeout: 300,
+            instances: [],
+            tag: "storage-plugin",
+            capability: "a volume on a LUN number whose old SCSI device stayed on the node (stale device after a failed deactivation)",
+        ),
+        Testcase(
+            name: "extended_guest_lvm_holder",
+            run: "./tests/guest_lvm_holder.pl",
+            timeout: 900,
+            instances: [],
+            tag: "storage-plugin",
+            capability: "deactivation of a volume whose guest LVM the host activated on top of the multipath map (udev pvscan)",
+        ),
+    ],
+)

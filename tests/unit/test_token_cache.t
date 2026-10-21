@@ -2,152 +2,62 @@
 
 use strict;
 use warnings;
-use Test::More tests => 16;
-use File::Temp qw(tempdir);
-use File::Path qw(make_path remove_tree);
-use JSON;
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use Test::More;
+use File::Temp qw( tempdir );
+use PluginLoader;
 
-# Create temporary cache directory
-my $cache_dir = tempdir( CLEANUP => 1 );
+my $plugin = PluginLoader::load();
+my %fn;
+$fn{ $_ } = $plugin->can( $_ ) // BAIL_OUT( "$plugin has no $_" ) for qw( write_token_cache read_token_cache is_token_valid cleanup_expired_cache );
 
-# Mock functions from plugin
-sub get_token_cache_path {
-  my ( $storeid, $array_index ) = @_;
-  my $dir = "$cache_dir/purestorage";
-  make_path($dir) unless -d $dir;
-  chmod 0700, $dir;
-  return "$dir/${storeid}_array${array_index}.json";
+my $dir  = tempdir( CLEANUP => 1 );
+my $path = "$dir/pure_array0.json";
+my $ttl  = 3600;
+
+sub token {
+  my ( %over ) = @_;
+  return { auth_token => 'test-token-12345', request_id => 'req-67890', created_at => time(), ttl => $ttl, expires_at => time() + $ttl, %over };
 }
 
-sub write_token_cache {
-  my ( $cache_path, $token_data ) = @_;
+# --- write and read ---
+$fn{ write_token_cache }->( $path, token() );
+ok( -f $path, 'token cache file created' );
+is( ( stat $path )[2] & 0777, 0600, 'cache file has permissions 600' );
+my $data = $fn{ read_token_cache }->( $path );
+is( $data->{ auth_token }, 'test-token-12345', 'auth token round-trips' );
+is( $data->{ request_id }, 'req-67890',        'request id round-trips' );
+is_deeply( [ glob "$dir/*.tmp.*" ], [], 'no temp file is left after the atomic write' );
 
-  my $temp_path = "$cache_path.tmp.$$";
-  open my $fh, '>', $temp_path or die "Cannot write to $temp_path: $!";
-  print $fh encode_json($token_data);
-  close $fh;
-
-  chmod 0600, $temp_path;
-  rename $temp_path, $cache_path or die "Cannot rename $temp_path to $cache_path: $!";
+# --- validity (the plugin refreshes at 80% of the ttl, +-2.5% jitter, so test away from the edge) ---
+ok( $fn{ is_token_valid }->( token(), $ttl ), 'fresh token is valid' );
+ok( $fn{ is_token_valid }->( token( created_at => time() - $ttl * 0.7 ),  $ttl ), 'token at 70% of the ttl is valid' );
+ok( !$fn{ is_token_valid }->( token( created_at => time() - $ttl * 0.9 ), $ttl ), 'token at 90% of the ttl needs a refresh' );
+ok( !$fn{ is_token_valid }->( undef, $ttl ), 'undefined token data is invalid' );
+for my $missing ( qw( auth_token created_at ttl ) ) {
+  my $incomplete = token();
+  delete $incomplete->{ $missing };
+  ok( !$fn{ is_token_valid }->( $incomplete, $ttl ), "token data without $missing is invalid" );
 }
 
-sub read_token_cache {
-  my ( $cache_path ) = @_;
+# --- cleanup of expired caches ---
+$fn{ write_token_cache }->( $path, token( created_at => time() - 4000, expires_at => time() - 400 ) );
+$fn{ cleanup_expired_cache }->( $path, $ttl );
+ok( !-f $path, 'expired cache file is removed' );
+$fn{ write_token_cache }->( $path, token() );
+$fn{ cleanup_expired_cache }->( $path, $ttl );
+ok( -f $path, 'cache file that has not expired stays' );
 
-  return undef unless -f $cache_path;
-
-  open my $fh, '<', $cache_path or return undef;
-  my $content = do { local $/; <$fh> };
-  close $fh;
-
-  return undef unless $content;
-
-  my $data = eval { decode_json($content) };
-  return undef if $@;
-
-  return $data;
-}
-
-sub is_token_valid {
-  my ( $token_data, $ttl ) = @_;
-
-  return 0 unless defined $token_data;
-  return 0 unless defined $token_data->{auth_token};
-  return 0 unless defined $token_data->{created_at};
-
-  my $now = time();
-  my $age = $now - $token_data->{created_at};
-  my $refresh_threshold = $ttl * 0.8;
-
-  return $age < $refresh_threshold;
-}
-
-sub cleanup_expired_cache {
-  my ( $cache_path, $ttl ) = @_;
-
-  my $token_data = read_token_cache($cache_path);
-  return unless $token_data;
-
-  my $now = time();
-  if ( $now > $token_data->{expires_at} ) {
-    unlink $cache_path;
-  }
-}
-
-# Test 1: Cache directory creation
-my $cache_path = get_token_cache_path('pure', 0);
-ok( -d "$cache_dir/purestorage", 'Cache directory created' );
-
-# Test 2: Cache directory permissions
-my $mode = (stat("$cache_dir/purestorage"))[2] & 0777;
-is( $mode, 0700, 'Cache directory has correct permissions (700)' );
-
-# Test 3: Write token cache
-my $token_data = {
-  auth_token => 'test-token-12345',
-  request_id => 'req-67890',
-  created_at => time(),
-  ttl        => 3600,
-  expires_at => time() + 3600
-};
-
-write_token_cache($cache_path, $token_data);
-ok( -f $cache_path, 'Token cache file created' );
-
-# Test 4: Cache file permissions
-$mode = (stat($cache_path))[2] & 0777;
-is( $mode, 0600, 'Cache file has correct permissions (600)' );
-
-# Test 5: Read token cache
-my $read_data = read_token_cache($cache_path);
-ok( defined $read_data, 'Token cache read successfully' );
-
-# Test 6: Verify token data
-is( $read_data->{auth_token}, 'test-token-12345', 'Auth token matches' );
-is( $read_data->{request_id}, 'req-67890', 'Request ID matches' );
-
-# Test 7: Valid token (fresh)
-ok( is_token_valid($read_data, 3600), 'Fresh token is valid' );
-
-# Test 8: Valid token at 79% of TTL
-$token_data->{created_at} = time() - (3600 * 0.79);
-write_token_cache($cache_path, $token_data);
-$read_data = read_token_cache($cache_path);
-ok( is_token_valid($read_data, 3600), 'Token at 79% TTL is still valid' );
-
-# Test 9: Invalid token at 81% of TTL
-$token_data->{created_at} = time() - (3600 * 0.81);
-write_token_cache($cache_path, $token_data);
-$read_data = read_token_cache($cache_path);
-ok( !is_token_valid($read_data, 3600), 'Token at 81% TTL is invalid' );
-
-# Test 10: Multiple array caches
-my $cache_path_1 = get_token_cache_path('pure', 1);
-write_token_cache($cache_path_1, $token_data);
-ok( -f $cache_path_1, 'Second array cache created' );
-isnt( $cache_path, $cache_path_1, 'Different cache files for different arrays' );
-
-# Test 11: Cleanup expired cache
-$token_data->{created_at} = time() - 4000;
-$token_data->{expires_at} = time() - 400;  # Expired
-write_token_cache($cache_path, $token_data);
-cleanup_expired_cache($cache_path, 3600);
-ok( !-f $cache_path, 'Expired cache file removed' );
-
-# Test 12: Read non-existent cache
-my $missing_cache = read_token_cache("$cache_dir/nonexistent.json");
-is( $missing_cache, undef, 'Non-existent cache returns undef' );
-
-# Test 13: Invalid JSON in cache
-my $corrupt_cache = "$cache_dir/purestorage/corrupt.json";
-open my $fh, '>', $corrupt_cache;
-print $fh "{ invalid json }";
+# --- bad input ---
+is( $fn{ read_token_cache }->( "$dir/nonexistent.json" ), undef, 'non-existent cache returns undef' );
+is( $fn{ read_token_cache }->( undef ),                   undef, 'undefined path returns undef' );
+my $corrupt = "$dir/corrupt.json";
+open( my $fh, '>', $corrupt ) or die $!;
+print { $fh } '{ invalid json }';
 close $fh;
-my $corrupt_data = read_token_cache($corrupt_cache);
-is( $corrupt_data, undef, 'Corrupt cache returns undef' );
+is( $fn{ read_token_cache }->( $corrupt ), undef, 'corrupt cache returns undef' );
+ok( !-e $corrupt,                                                                  'corrupt cache file is deleted' );
+ok( !eval { $fn{ write_token_cache }->( "$dir/missing-dir/x.json", token() ); 1 }, 'writing into a missing directory dies' );
 
-# Test 14: Missing required fields
-my $incomplete_data = { auth_token => 'test' };  # Missing created_at
-ok( !is_token_valid($incomplete_data, 3600), 'Incomplete token data is invalid' );
-
-done_testing();
+done_testing;

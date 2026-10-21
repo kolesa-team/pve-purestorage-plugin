@@ -22,7 +22,7 @@ concurrency:
 jobs:
   check-changes:
     name: Check changed files
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     outputs:
       check-all: ${{ steps.set-check-all.outputs.check-all }}
       perl-changed: ${{ steps.changed-files-perl.outputs.any_changed }}
@@ -32,7 +32,7 @@ jobs:
       markdown-files: ${{ steps.set-markdown-files.outputs.files }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0
 
@@ -49,7 +49,7 @@ jobs:
 
     - name: Check changed Perl files
       id: changed-files-perl
-      uses: tj-actions/changed-files@v47
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
       with:
         files: |
           **/*.pm
@@ -57,14 +57,14 @@ jobs:
 
     - name: Check changed Markdown files
       id: changed-files-markdown
-      uses: tj-actions/changed-files@v47
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
       with:
         files: |
           **/*.md
 
     - name: Check changed test files
       id: changed-files-test
-      uses: tj-actions/changed-files@v47
+      uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
       with:
         files: |
           tests/**/*.t
