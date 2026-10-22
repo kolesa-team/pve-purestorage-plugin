@@ -1,0 +1,6 @@
+# kpartx must not create partition maps on the multipath map of a Pure volume. A partition map holds its parent map
+# exclusively, so the kernel cannot claim the map to drop its page cache before a discard or a write of zeroes. With
+# cache=writeback the cache holds dirty pages of the guest and the request fails with EBUSY; QEMU 10.1 and later pass
+# that to the guest as an I/O error and the write is lost. 60-kpartx.rules skips a map whose DM_SUBSYSTEM_UDEV_FLAG1
+# (the "skip_kpartx" flag) is 1, so this file must be read before it.
+ACTION=="add|change", SUBSYSTEM=="block", KERNEL=="dm-[0-9]*", ENV{DM_UUID}=="mpath-3624a9370*", ENV{DM_SUBSYSTEM_UDEV_FLAG1}="1"
