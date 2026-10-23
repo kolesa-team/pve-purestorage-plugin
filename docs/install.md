@@ -32,6 +32,7 @@ devices {
     features             "0"
     dev_loss_tmo         60
     recheck_wwid         yes
+    skip_kpartx          yes  # no partition maps on the volumes, see below
   }
 }
 
@@ -50,14 +51,20 @@ blacklist_exceptions {
 }
 ```
 
+`skip_kpartx yes` stops kpartx from creating partition maps (`<wwid>-part1` and so on) on top of the multipath map of a volume. The host never needs them: the guest reads its own partition table. A partition map holds the multipath map exclusively, and with `cache=writeback` on the disk the guest then loses writes, see [I/O errors in a guest on discard or zeroes](troubleshooting.md#known-issues). The packaged rule `59-pure-storage-kpartx.rules` sets the same flag through udev, so the plugin does not depend on this line; keep it so that the setting holds without the rule too. `multipathd reconfigure` applies the new setting to the existing maps without recreating them, and removes none of the partition maps that already exist.
+
 ### udev Rules
 
-The package installs the udev rules file `68-pure-storage.rules` into `/usr/lib/udev/rules.d/`; a source install copies it (see below). It holds two things.
+The package installs two udev rules files into `/usr/lib/udev/rules.d/`; a source install copies them (see below).
+
+`59-pure-storage-kpartx.rules` keeps kpartx away from the multipath maps of Pure volumes: it sets the flag that `60-kpartx.rules` reads as `skip_kpartx`, so the file must be read before `60-kpartx.rules`. It acts on the next udev event of a map; partition maps that exist already stay until the map is removed, or until they are removed by hand, see [I/O errors in a guest on discard or zeroes](troubleshooting.md#known-issues).
+
+`68-pure-storage.rules` holds two things.
 
 - A rule that keeps LVM of the host away from the multipath maps of Pure volumes. Without it the host may activate the volume group that a guest keeps on its disk, and the volume cannot be deactivated afterwards, see [LVM inside a volume](troubleshooting.md#known-issues). The file must be read before `69-lvm.rules`. The rule also applies to LVM that you run on a Pure volume on the host: its volume groups are not activated by udev, activate them with `vgchange -ay`.
 - The kernel settings that Pure recommends for FlashArray volumes (`none` scheduler, `add_random`, `rq_affinity`, SCSI timeout, `max_sectors_kb`), see the Linux recommended settings of Pure. They are applied by the same file, so a file with these settings that you install yourself (for example `99-pure-storage.rules`) only repeats them.
 
-To turn the file off on a node, mask it with a symlink to `/dev/null` of the same name: `ln -s /dev/null /etc/udev/rules.d/68-pure-storage.rules` (a file in `/etc/udev/rules.d` replaces the packaged one of the same name, and a symlink to `/dev/null` disables the rules, see `udev(7)`; an empty file of the same name does the same), then run `udevadm control --reload-rules`.
+To turn a file off on a node, mask it with a symlink to `/dev/null` of the same name, for example `ln -s /dev/null /etc/udev/rules.d/68-pure-storage.rules` (a file in `/etc/udev/rules.d` replaces the packaged one of the same name, and a symlink to `/dev/null` disables the rules, see `udev(7)`; an empty file of the same name does the same), then run `udevadm control --reload-rules`.
 
 ### iSCSI Configuration
 
@@ -98,7 +105,7 @@ sudo apt-get install -y libpve-common-perl libwww-perl libhttp-message-perl libu
 git clone https://github.com/kolesa-team/pve-purestorage-plugin.git
 cd pve-purestorage-plugin
 sudo install -D -m 644 PureStoragePlugin.pm /usr/share/perl5/PVE/Storage/Custom/PureStoragePlugin.pm
-sudo install -m 644 udev/68-pure-storage.rules /usr/lib/udev/rules.d/
+sudo install -m 644 udev/59-pure-storage-kpartx.rules udev/68-pure-storage.rules /usr/lib/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo systemctl restart pvedaemon.service pveproxy.service pvestatd.service
 ```
