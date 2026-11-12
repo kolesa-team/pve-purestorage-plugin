@@ -39,6 +39,7 @@ perl tests/unit/test_token_cache.t
 | `test_status_backoff.t` | after a failed status the storage is inactive without a call to the array for 30 seconds, the marker goes after an answer |
 | `test_token_cache.t` | token cache write, read, validity window, expiry cleanup, corrupt and missing files, file mode 0600 |
 | `test_unmap_volume.t` | order of the removal (map, offline, array disconnect, delete), the paths are deleted although the array disconnect fails, paths that survive the delete are an error |
+| `test_user_agent.t` | the `User-Agent` of requests to the array is `pure/ProxmoxVEPlugin/<version>`, an unstamped copy sends `pure/ProxmoxVEPlugin/`, `scripts/stamp_version.sh` stamps a release version and refuses anything else |
 
 `tests/unit/lib/PluginLoader.pm` loads the plugin. On a PVE node the real `PVE::*` modules are used; elsewhere the stubs in `tests/unit/lib/PVE/` stand in for them (appended to `@INC`, so real modules win). The command paths and the token cache directory are fixed in the plugin, so the tests cover what holds on any machine.
 
