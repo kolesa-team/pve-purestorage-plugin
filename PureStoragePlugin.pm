@@ -57,6 +57,9 @@ our $STATUS_MARKER_DIR    = '/run/pve-purestorage'
 our $STATUS_BACKOFF  = 30;    # seconds a storage stays inactive after a failed status
 our $STALE_PATH_WAIT = 3;     # seconds a new volume gets to appear before stale devices are looked for
 
+our $PLUGIN_NAME    = 'ProxmoxVEPlugin';    # the client name in the User-Agent of FlashArray requests
+our $PLUGIN_VERSION = '';                   # stamped with the tag version by the release build (scripts/stamp_version.sh); empty otherwise
+
 my $PSFA_API               = '2.26';
 my $purestorage_wwn_prefix = '3624a9370';
 my $default_hgsuffix       = "";
@@ -1121,13 +1124,19 @@ sub try_cached_token {
 
 ### BLOCK: Local multipath => PVE::Storage::Custom::PureStoragePlugin::sub::s
 
+# User-Agent for FlashArray requests, in the format all Pure integrations share: pure/<client name>/<client version>.
+# The name ends with a slash even when the version is unknown, so that the value stays parseable.
+sub plugin_user_agent {
+  return 'pure/' . $PLUGIN_NAME . '/' . $PLUGIN_VERSION;
+}
+
 sub purestorage_api_call {
   my ( $scfg, $action, $all, $storeid, $array_index ) = @_;
   $logger->( P_TRACE, "purestorage_api_call", $scfg );
 
   $all //= 0;
 
-  my $ua = LWP::UserAgent->new( timeout => 15 );
+  my $ua = LWP::UserAgent->new( timeout => 15, agent => plugin_user_agent() );
   $ua->ssl_opts(
     verify_hostname => 0,
     SSL_verify_mode => 0x00
