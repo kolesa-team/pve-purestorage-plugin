@@ -52,6 +52,14 @@ jobs:
 
         tac changelog > debian/changelog
 
+    - name: Stamp version
+      if: ${{ github.ref_type == 'tag' }}
+      working-directory: ./src
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        ./scripts/stamp_version.sh "${TAG#v}"
+
     - name: Build deb
       working-directory: ./src
       run: |
