@@ -110,6 +110,8 @@ sudo udevadm control --reload-rules
 sudo systemctl restart pvedaemon.service pveproxy.service pvestatd.service
 ```
 
+The plugin reports its version to the array in the `User-Agent` of its requests (`pure/ProxmoxVEPlugin/<version>`). Release packages carry the version of their tag. A copy from a checkout carries none, so its requests identify the plugin as `pure/ProxmoxVEPlugin/`.
+
 ### Verify
 
 ```bash
